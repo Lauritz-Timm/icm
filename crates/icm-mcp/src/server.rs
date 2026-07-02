@@ -103,35 +103,49 @@ pub fn run_server(
             }
         };
 
-        let method = msg.method.as_deref().unwrap_or("");
-        debug!("MCP request: {method}");
-
-        // Notifications have no id — don't respond
-        let id = match msg.id {
-            Some(id) => id,
-            None => continue,
-        };
-
-        let response = match method {
-            "initialize" => handle_initialize(id),
-            "ping" => JsonRpcResponse::ok(id, json!({})),
-            "tools/list" => handle_tools_list(id, embedder.is_some()),
-            "tools/call" => handle_tools_call(
-                id,
-                &msg.params,
-                store,
-                embedder,
-                compact,
-                auto_consolidate,
-                &mut calls_since_store,
-            ),
-            other => JsonRpcResponse::method_not_found(id, other),
-        };
-
-        write_response(&mut stdout, &response)?;
+        if let Some(response) = handle_json_rpc_message(
+            msg,
+            store,
+            embedder,
+            compact,
+            auto_consolidate,
+            &mut calls_since_store,
+        ) {
+            write_response(&mut stdout, &response)?;
+        }
     }
 
     Ok(())
+}
+
+pub fn handle_json_rpc_message(
+    msg: JsonRpcMessage,
+    store: &Store,
+    embedder: Option<&dyn Embedder>,
+    compact: bool,
+    auto_consolidate: AutoConsolidate,
+    calls_since_store: &mut u32,
+) -> Option<JsonRpcResponse> {
+    let method = msg.method.as_deref().unwrap_or("");
+    debug!("MCP request: {method}");
+
+    let id = msg.id?;
+
+    Some(match method {
+        "initialize" => handle_initialize(id),
+        "ping" => JsonRpcResponse::ok(id, json!({})),
+        "tools/list" => handle_tools_list(id, embedder.is_some()),
+        "tools/call" => handle_tools_call(
+            id,
+            &msg.params,
+            store,
+            embedder,
+            compact,
+            auto_consolidate,
+            calls_since_store,
+        ),
+        other => JsonRpcResponse::method_not_found(id, other),
+    })
 }
 
 fn write_response(stdout: &mut io::Stdout, resp: &JsonRpcResponse) -> anyhow::Result<()> {

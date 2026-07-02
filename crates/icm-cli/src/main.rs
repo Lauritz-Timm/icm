@@ -739,7 +739,7 @@ enum Commands {
 
         /// Launch web dashboard instead of MCP stdio server
         #[cfg(feature = "web")]
-        #[arg(long)]
+        #[arg(long, conflicts_with = "http_proxy")]
         expose: bool,
 
         /// Run a persistent local HTTP API on the given address instead
@@ -753,10 +753,12 @@ enum Commands {
         #[arg(long, value_name = "ADDR")]
         http: Option<std::net::SocketAddr>,
 
-        /// Require `Authorization: Bearer <TOKEN>` on every HTTP
-        /// request (only meaningful with `--http`). Required unless
-        /// `--http` binds a loopback address (127.0.0.1/::1) — binding
-        /// any other interface without a token is refused.
+        /// Forward MCP stdio requests to an `icm serve --http` daemon.
+        #[cfg(feature = "http-api")]
+        #[arg(long = "http-proxy", value_name = "URL", conflicts_with = "http")]
+        http_proxy: Option<String>,
+
+        /// Bearer token used by the HTTP server or proxy.
         #[cfg(feature = "http-api")]
         #[arg(long, value_name = "TOKEN")]
         token: Option<String>,
@@ -1601,6 +1603,22 @@ fn main() -> Result<()> {
 
     let cli = Cli::parse();
     let cfg = config::load_config()?;
+
+    #[cfg(feature = "http-api")]
+    if let Commands::Serve {
+        compact,
+        http_proxy: Some(base_url),
+        token,
+        ..
+    } = &cli.command
+    {
+        return http_api::run_mcp_stdio_proxy(
+            base_url,
+            token.as_deref(),
+            *compact || cfg.mcp.compact,
+        );
+    }
+
     let embeddings_enabled =
         cfg.embeddings.enabled && !cli.no_embeddings && std::env::var("ICM_NO_EMBEDDINGS").is_err();
     // Load-dynamic build (issue #345): resolve the onnxruntime runtime. Activate
@@ -2168,6 +2186,8 @@ fn main() -> Result<()> {
             #[cfg(feature = "http-api")]
             http,
             #[cfg(feature = "http-api")]
+                http_proxy: _,
+            #[cfg(feature = "http-api")]
             token,
         } => {
             #[cfg(feature = "web")]
@@ -2188,7 +2208,11 @@ fn main() -> Result<()> {
             if let Some(addr) = http {
                 let boxed_emb: Option<Box<dyn icm_core::Embedder + Send + Sync>> =
                     embedder.map(|e| Box::new(e) as Box<dyn icm_core::Embedder + Send + Sync>);
-                return http_api::run_http_server(store, boxed_emb, addr, token);
+                let auto_consolidate = icm_mcp::AutoConsolidate {
+                    enabled: cfg.memory.auto_consolidate_enabled,
+                    threshold: cfg.memory.auto_consolidate_threshold,
+                };
+                return http_api::run_http_server(store, boxed_emb, addr, token, auto_consolidate);
             }
             #[cfg(feature = "embeddings")]
             let emb_ref = embedder.as_ref().map(|e| e as &dyn icm_core::Embedder);
@@ -11346,6 +11370,34 @@ mod cli_contracts_tests {
         assert!(tip.contains("--summarizer-provider"));
         assert!(tip.contains("provider=none"));
         assert!(tip.contains("--keep-originals"));
+    }
+
+    #[cfg(feature = "http-api")]
+    #[test]
+    fn serve_accepts_http_proxy_url_for_stdio_mcp() {
+        let cli = Cli::try_parse_from([
+            "icm",
+            "serve",
+            "--http-proxy",
+            "http://127.0.0.1:11435",
+            "--token",
+            "secret",
+        ])
+        .unwrap();
+
+        let Commands::Serve {
+            compact,
+            http_proxy,
+            token,
+            ..
+        } = cli.command
+        else {
+            panic!("expected serve command");
+        };
+
+        assert!(!compact);
+        assert_eq!(http_proxy.as_deref(), Some("http://127.0.0.1:11435"));
+        assert_eq!(token.as_deref(), Some("secret"));
     }
 }
 

@@ -25,6 +25,7 @@
 //! is refused at startup — otherwise the full memory store would be
 //! reachable, unauthenticated, to anyone on that interface.
 
+use std::io::{self, BufRead, Write};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
@@ -39,6 +40,8 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
+use icm_mcp::protocol::{JsonRpcMessage, JsonRpcResponse};
 
 use icm_core::{
     is_preference_topic, keyword_matches, project_matches, topic_matches, Embedder, Importance,
@@ -62,6 +65,8 @@ use crate::recall_format::{self, RecallFormat};
 pub struct AppState {
     store: Arc<Mutex<Store>>,
     embedder: Option<Arc<dyn Embedder + Send + Sync>>,
+    mcp_calls_since_store: Arc<Mutex<u32>>,
+    auto_consolidate: icm_mcp::AutoConsolidate,
     /// When set, every request must carry `Authorization: Bearer <token>`.
     token: Option<String>,
 }
@@ -177,6 +182,12 @@ pub struct ConsolidateReq {
     keep_originals: bool,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct McpQuery {
+    #[serde(default)]
+    compact: bool,
+}
+
 // ---------------------------------------------------------------------------
 // Server entry
 // ---------------------------------------------------------------------------
@@ -202,6 +213,7 @@ pub async fn run_http_server(
     embedder: Option<Box<dyn Embedder + Send + Sync>>,
     addr: SocketAddr,
     token: Option<String>,
+    auto_consolidate: icm_mcp::AutoConsolidate,
 ) -> Result<()> {
     // A non-loopback bind with no token exposes the full memory store —
     // recall, store, consolidate — to anyone who can reach the interface,
@@ -214,10 +226,13 @@ pub async fn run_http_server(
     let state = AppState {
         store: Arc::new(Mutex::new(store)),
         embedder: embedder.map(Arc::from),
+        mcp_calls_since_store: Arc::new(Mutex::new(0)),
+        auto_consolidate,
         token,
     };
 
     let app = Router::new()
+        .route("/mcp", post(handle_mcp))
         .route("/recall", post(handle_recall))
         .route("/store", post(handle_store))
         .route("/consolidate", post(handle_consolidate))
@@ -237,6 +252,36 @@ pub async fn run_http_server(
     eprintln!("[icm http] listening on http://{local}");
 
     axum::serve(listener, app).await?;
+    Ok(())
+}
+
+pub fn run_mcp_stdio_proxy(base_url: &str, token: Option<&str>, compact: bool) -> Result<()> {
+    let endpoint = mcp_proxy_endpoint(base_url, compact)?;
+    let stdin = io::stdin();
+    let mut stdout = io::stdout();
+
+    for line in stdin.lock().lines() {
+        let line = line?;
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        match post_mcp_json_rpc(&endpoint, token, line) {
+            Ok(Some(body)) => {
+                writeln!(stdout, "{body}")?;
+                stdout.flush()?;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                let id = json_rpc_id(line);
+                let response = JsonRpcResponse::err(id, -32000, e.to_string());
+                writeln!(stdout, "{}", serde_json::to_string(&response)?)?;
+                stdout.flush()?;
+            }
+        }
+    }
+
     Ok(())
 }
 
@@ -284,6 +329,87 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
         return false;
     }
     a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+async fn handle_mcp(
+    State(state): State<AppState>,
+    Query(q): Query<McpQuery>,
+    Json(raw): Json<Value>,
+) -> Response {
+    let msg: JsonRpcMessage = match serde_json::from_value(raw) {
+        Ok(msg) => msg,
+        Err(e) => {
+            let response = JsonRpcResponse::err(Value::Null, -32700, format!("parse error: {e}"));
+            return Json(response).into_response();
+        }
+    };
+
+    let store = lock_store(&state);
+    let mut calls_since_store = state
+        .mcp_calls_since_store
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+    match icm_mcp::server::handle_json_rpc_message(
+        msg,
+        &store,
+        state.embedder_ref(),
+        q.compact,
+        state.auto_consolidate,
+        &mut calls_since_store,
+    ) {
+        Some(response) => Json(response).into_response(),
+        None => StatusCode::NO_CONTENT.into_response(),
+    }
+}
+
+fn mcp_proxy_endpoint(base_url: &str, compact: bool) -> Result<String> {
+    let trimmed = base_url.trim().trim_end_matches('/');
+    if trimmed.is_empty() {
+        anyhow::bail!("--http-proxy URL must not be empty");
+    }
+    let mut endpoint = if trimmed.ends_with("/mcp") || trimmed.contains("/mcp?") {
+        trimmed.to_string()
+    } else {
+        format!("{trimmed}/mcp")
+    };
+    endpoint.push(if endpoint.contains('?') { '&' } else { '?' });
+    endpoint.push_str("compact=");
+    endpoint.push_str(if compact { "true" } else { "false" });
+    Ok(endpoint)
+}
+
+fn post_mcp_json_rpc(endpoint: &str, token: Option<&str>, body: &str) -> Result<Option<String>> {
+    let mut req = ureq::post(endpoint).set("content-type", "application/json");
+    if let Some(token) = token {
+        req = req.set("authorization", &format!("Bearer {token}"));
+    }
+
+    match req.send_string(body) {
+        Ok(resp) => {
+            if resp.status() == StatusCode::NO_CONTENT.as_u16() {
+                return Ok(None);
+            }
+            let body = resp.into_string()?;
+            if body.trim().is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(body))
+            }
+        }
+        Err(ureq::Error::Status(code, resp)) => {
+            let text = resp.into_string().unwrap_or_default();
+            anyhow::bail!("HTTP {code} from ICM daemon: {}", text.trim());
+        }
+        Err(e) => Err(e.into()),
+    }
+}
+
+fn json_rpc_id(line: &str) -> Value {
+    serde_json::from_str::<Value>(line)
+        .ok()
+        .and_then(|v| v.get("id").cloned())
+        .unwrap_or(Value::Null)
 }
 
 // ---------------------------------------------------------------------------
@@ -826,6 +952,11 @@ mod tests {
         let state = AppState {
             store: Arc::new(Mutex::new(Store::in_memory().unwrap())),
             embedder: None,
+            mcp_calls_since_store: Arc::new(Mutex::new(0)),
+            auto_consolidate: icm_mcp::AutoConsolidate {
+                enabled: false,
+                threshold: 10,
+            },
             token: None,
         };
 
@@ -888,6 +1019,11 @@ mod tests {
         let state = AppState {
             store: Arc::new(Mutex::new(store)),
             embedder: Some(Arc::new(StubEmbedder)),
+            mcp_calls_since_store: Arc::new(Mutex::new(0)),
+            auto_consolidate: icm_mcp::AutoConsolidate {
+                enabled: false,
+                threshold: 10,
+            },
             token: None,
         };
 
@@ -909,6 +1045,22 @@ mod tests {
         assert!(
             memories[0].embedding.is_some(),
             "consolidated memory must have an embedding attached"
+        );
+    }
+
+    #[test]
+    fn mcp_proxy_endpoint_points_at_mcp_route_with_compact_flag() {
+        assert_eq!(
+            mcp_proxy_endpoint("http://127.0.0.1:11435", true).unwrap(),
+            "http://127.0.0.1:11435/mcp?compact=true"
+        );
+        assert_eq!(
+            mcp_proxy_endpoint("http://127.0.0.1:11435/mcp", false).unwrap(),
+            "http://127.0.0.1:11435/mcp?compact=false"
+        );
+        assert_eq!(
+            mcp_proxy_endpoint("http://127.0.0.1:11435/", false).unwrap(),
+            "http://127.0.0.1:11435/mcp?compact=false"
         );
     }
 }

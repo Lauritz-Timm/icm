@@ -1,4 +1,4 @@
-# Clean-room evaluation design v4 and untouched baseline
+# Clean-room evaluation design v5 and untouched baseline
 
 Date: 2026-08-05  
 Role: independent evaluation designer  
@@ -7,7 +7,7 @@ Product changes: none
 
 ## Outcome
 
-The standalone evaluator under `cleanroom/eval` now implements the audited v4
+The standalone evaluator under `cleanroom/eval` now implements the audited v5
 design. It contains 326 preregistered scenarios and evaluates a real ICM binary
 against evaluator-owned SQLite/JSON fixtures, 29 exact legacy observations,
 closed modern schemas, provider lifecycle contracts, and deterministic
@@ -20,7 +20,7 @@ The corrected authoritative untouched-develop result is:
 | PASS | 71 | Untouched behavior met the preregistered contract |
 | FAIL | 21 | Reproducible upstream protocol or boundary deficiencies |
 | UNSUPPORTED_BASELINE | 234 | Required replacement capability is absent, with concrete wire or CLI evidence |
-| Total | 326 | Complete v4 inventory |
+| Total | 326 | Complete v5 inventory |
 
 `portableAcceptance` is false for untouched `develop`, as expected. Candidate
 mode requires every scenario to pass. Replaying the untouched binary in
@@ -28,16 +28,25 @@ candidate mode produced 71 PASS and 255 FAIL: the 21 observed deficiencies and
 all 234 unsupported capabilities became hard failures. All 71 baseline passes
 remained passes, including all 29 exact deterministic legacy goldens.
 
+Versions 1 through 4 were frozen before replacement code. Phase 2 replacement
+source existed while v5 was corrected, so v5 does not make that blanket claim.
+Version 5 was frozen before any candidate scenario execution, no candidate
+outcomes were observed or used to tune acceptance, and its correction basis was
+limited to official MCP output-schema semantics and independently mergeable
+phase gates. All authoritative evaluator-freeze evidence below evaluates the
+unchanged upstream-develop binary, not the changing Phase 2 product.
+
 ## Provenance and package health
 
 The evaluated ICM binary has SHA-256
 `8ec3c43899f6f899c230165026945b224ad9926f41ae6d618c6d473ad032e684`.
 The final evaluator binary has SHA-256
-`ce32efaa1150d90235598a3c1ffdd5afe12963b89942fdb06fe0b396a87c9ac3`.
-The v4 preregistered design has SHA-256
-`1413774873830be5de2bd8b9c83b8283d769110dbc2b64c935c05eeb0b848e69`.
-The evaluator source-tree aggregate is
-`e326c5488ad889323e7ebce164f0c234f428f20be4e735d5f5c2b98071a64fa2`.
+`82c5c0893174b03b8ed9e396c5e3580cb629b718eb0cf25914a3899a71183cd5`.
+The v5 preregistered design has SHA-256
+`103e7e34ef7c475d03d0be34a2c6e1a51d4813008fe3a0a6390a815f56609c63`.
+The evaluator source-tree aggregate, computed from the sorted
+`Cargo.toml`/`Cargo.lock`/`src`/`contracts`/`fixtures`/`goldens` file-hash list,
+is `9aa3f35add0fd37df906752a87d9d4e676133d917278f7fb79a26a925f5a6528`.
 Its independent lockfile has SHA-256
 `5c620c2c8f895a15524e8b4589246f72e9af67f59a3157f9c681d51380ac4993`.
 
@@ -46,8 +55,8 @@ The final evaluator passes:
 - `cargo fmt --check`;
 - locked, offline build and tests;
 - locked, offline clippy across all targets with warnings denied;
-- 27 evaluator-owned unit tests;
-- design verification at version 4: 326 scenarios, 31 tools, 11 structured
+- 31 evaluator-owned unit tests;
+- design verification at version 5: 326 scenarios, 31 tools, 11 structured
   tool schemas, 29 deterministic legacy goldens, five fixture files, seven
   contract files, and 30 typed threshold bindings;
 - a real-loopback, two-root self-test under one spaces path and one Unicode
@@ -59,11 +68,25 @@ and JSON fixtures. Product behavior is observed only by launching the separate
 candidate binary. No product source, repository lockfile, branch, commit, or
 remote was changed.
 
-## Frozen v4 contract
+## Frozen v5 contract
 
-Versions 1 through 3 remain immutable in their prior evidence and archives.
-Version 4 closes the remaining evaluator-integrity gaps before any
-implementation work:
+Versions 1 through 4 remain immutable in their prior evidence and archives.
+Version 5 corrects two evaluator-integrity defects before candidate execution,
+without changing the 326-scenario inventory or acceptance thresholds:
+
+- each of the 11 advertised output schemas is independently self-contained,
+  explicitly declares an object root for MCP 2025 projections, and resolves
+  local references only against its own wire document; feedback record is
+  inlined at its object root;
+- actual structured emissions use the individual advertised schema as both
+  resolver root and validation schema;
+- output-schema presence, self-containment, and exact equality are mandatory
+  only in the dedicated Phase 3 output-schema scenario. The ten Phase 2
+  tools/list and annotation gates accept conforming responses without
+  `outputSchema`; the closed-schema gate checks output closure only when an
+  output schema is present;
+- an evaluator regression runs all ten Phase 2 gates without output schemas and
+  separately proves that the dedicated Phase 3 gate rejects their absence;
 
 - exact MCP lifecycle state tests cover calls before initialize, the
   initialize-response gap, initialized-before-initialize, duplicate
@@ -95,8 +118,9 @@ The frozen contract hashes are:
 | Contract | SHA-256 |
 |---|---|
 | `mcp-2026-wire-contract.json` | `266d433ded7fcb0a807c5faae313fa32da4c0d42bdf403fa19544ccba4752582` |
-| `modern-output-schemas.json` | `497c18785012cc356047598b40863fa296f4d5574838ff126f0fde290baaaff4` |
+| `modern-output-schemas.json` | `640f018bab821ad1d81e3c10fa6c986eabc460fd763d2dc9a54539a88f0bee9c` |
 | `normalization-rules.json` | `d2f012a84b713fed7a364368c7453df70f0f2dbf53eb313b20f2c1ddb39e8245` |
+| `preregistered-design.json` | `103e7e34ef7c475d03d0be34a2c6e1a51d4813008fe3a0a6390a815f56609c63` |
 | `provider-contracts.json` | `e4e51d09f0ac5ec3fe9e9ae02a254c86c6f38f61c3271a77ff7dbe61c2cf7a37` |
 | `proxy-contracts.json` | `77c3ec5e536c9a1dc3538eeb7b3274929e16d4d58a62aa5238dce57d1828840e` |
 | `tool-annotations.json` | `a09b9be52596d9c1c4de061f6a424bda556550122c6557a96c02279688dbf7ff` |
@@ -204,26 +228,29 @@ The authoritative evidence tree contains neither the inherited home path nor
 the `ICM_EVAL_CANARY_V4_` prefix. Every result's embedded raw-exchange hash was
 recomputed against its sibling JSONL file.
 
-## Authoritative v4 evidence
+## Authoritative v5 evidence
 
 The spaces/Unicode two-root reports are byte-identical after only the frozen
 normalization allowlist:
 
-`1834b01b9572111d70a8dd54a3705615d42f40994079e5318b02585b088be41a`
+`57a4aeb6c52bd3f483ee376ff5ff1f6625c712a8b0261d87d55df89557f470a1`
 
-Artifacts relative to the v4 evidence root:
+Artifacts relative to the v5 evidence root:
 
 | Artifact | SHA-256 |
 |---|---|
-| `authoritative-untouched-develop-v4-result.json` | `ec50886515f6ad0acbe9073c14bde92e28ee74602d4110bd4f05f10a2ec7103a` |
-| `authoritative-untouched-develop-v4-raw-exchanges.jsonl` | `3a6437563841cfd5ff629dbce7fddcb605859d3ab298bff5a7dec698fba6da15` |
-| `authoritative-hermetic-two-root-v4-result.json` | `fc717cd285adf11fee521e2e029d9e5d0dd9b73944108cf8e81e2be8282bbf80` |
-| `authoritative-hermetic-two-root-v4-root-1-result.json` | `96c40d70ddd87e5254f79bf438a227787bea1fa948ded1c6c456dd4c7f79a514` |
-| `authoritative-hermetic-two-root-v4-root-1-raw-exchanges.jsonl` | `d65be2829aebc767bd29f8ee91d35b67c1dece364d191661e77b0581efed9f93` |
-| `authoritative-hermetic-two-root-v4-root-2-result.json` | `83fad35ed081b4faf0123842eeb8a6813504d49907b6705de7fe89f10e01a758` |
-| `authoritative-hermetic-two-root-v4-root-2-raw-exchanges.jsonl` | `dd085c88c75b408964fc922c61f2bbef01d0ecd1e8aab5531882242153418d51` |
-| `authoritative-golden-replay-v4-result.json` | `6f5c67e1f5b295ed19c1445a9a309e3899a66c4554c080c54a9f3765ff822bb3` |
-| `authoritative-golden-replay-v4-raw-exchanges.jsonl` | `0a822af53fc74b1cc39ff0080398856f7fef9c8ac679e364cd41d6d28d401bad` |
+| `authoritative-untouched-develop-v5-result.json` | `b1da42793c7289c02b27cb6422b9da39d1375e765cffc1157ffe0ab96ff05cbb` |
+| `authoritative-untouched-develop-v5-raw-exchanges.jsonl` | `5a1aa1e7bf59bb03672618a9cc71acec8e743b69de9eda1bc7604ce2cf459d8d` |
+| `authoritative-hermetic-two-root-v5-result.json` | `77b6584e6083b0484df41c74e2a3dec476c4f15ed03e587f86c1f696c7b49b69` |
+| `authoritative-hermetic-two-root-v5-root-1-result.json` | `98402e30c55560973cee16c2ed083ff62229ca3b8210de2f6fe281896137350d` |
+| `authoritative-hermetic-two-root-v5-root-1-raw-exchanges.jsonl` | `cb32aae9fa2bd2dab3d32c1ad2cb3c5e618686675cfcd5141654c8e5b9cd08f3` |
+| `authoritative-hermetic-two-root-v5-root-2-result.json` | `dbc53feafb8a1d42c9c185ec5f760497f549c56b7ab0e091bebaa5a03b7df138` |
+| `authoritative-hermetic-two-root-v5-root-2-raw-exchanges.jsonl` | `a875f2cad3ffc86c7007902624a8f96aa6afffc6b4a480cc04589855b33f8f38` |
+| `authoritative-golden-replay-v5-result.json` | `22aedeb0375bfa19f3ae17cd977316fc89dc230cc3c8a5ff30241fc14276084f` |
+| `authoritative-golden-replay-v5-raw-exchanges.jsonl` | `b3fcefb1c63dfbdd5a7d5ee9c89d60d36c2b9041acb81e70b8b7f7cab753deac` |
+
+The aggregate over the sorted nine-file evidence hash list is
+`5f586b473e64471f71b063010ba4551a057ff4078373b252ba5f1c38bf78a03c`.
 
 ## Baseline measurements
 
@@ -233,9 +260,9 @@ samples produced these host observations in microseconds:
 
 | Operation | Median | p95 |
 |---|---:|---:|
-| tools/list | 1,450 | 1,676 |
-| memory/recall | 1,452 | 1,675 |
-| memory/stats | 121 | 188 |
+| tools/list | 1,460 | 1,688 |
+| memory/recall | 1,480 | 1,643 |
+| memory/stats | 129 | 142 |
 
 Retrieval over six committed queries remained perfect: Hit@3 1.0, Recall@3
 1.0, and nDCG@3 1.0. Latency is measured but interpreted with the frozen ratio,

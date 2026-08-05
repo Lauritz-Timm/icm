@@ -1,105 +1,61 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$defs": {
-    "memory": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "id": {"type": "string", "minLength": 1},
-        "createdAt": {"type": "string", "format": "date-time"},
-        "updatedAt": {"type": "string", "format": "date-time"},
-        "lastAccessed": {"type": "string", "format": "date-time"},
-        "accessCount": {"type": "integer", "minimum": 0},
-        "weight": {"type": "number"},
-        "topic": {"type": "string"},
-        "summary": {"type": "string"},
-        "rawExcerpt": {"oneOf": [{"type": "string"}, {"type": "null"}]},
-        "rawExcerptTruncated": {"type": "boolean"},
-        "rawExcerptBytes": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]},
-        "keywords": {"type": "array", "items": {"type": "string"}},
-        "importance": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
-        "source": {
-          "oneOf": [
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {"type": {"const": "manual"}},
-              "required": ["type"]
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "type": {"const": "conversation"},
-                "threadId": {"type": "string"}
-              },
-              "required": ["type", "threadId"]
-            },
-            {
-              "type": "object",
-              "additionalProperties": false,
-              "properties": {
-                "type": {"const": "claudeCode"},
-                "sessionId": {"type": "string"},
-                "filePath": {"oneOf": [{"type": "string"}, {"type": "null"}]}
-              },
-              "required": ["type", "sessionId", "filePath"]
-            }
-          ]
-        },
-        "relatedIds": {"type": "array", "items": {"type": "string"}},
-        "scope": {"type": "string", "enum": ["user", "project", "org"]},
-        "score": {"oneOf": [{"type": "number"}, {"type": "null"}]}
-      },
-      "required": ["id", "createdAt", "updatedAt", "lastAccessed", "accessCount", "weight", "topic", "summary", "rawExcerpt", "rawExcerptTruncated", "rawExcerptBytes", "keywords", "importance", "source", "relatedIds", "scope", "score"]
-    },
-    "session": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "id": {"type": "string"},
-        "agent": {"type": "string"},
-        "project": {"oneOf": [{"type": "string"}, {"type": "null"}]},
-        "startedAt": {"type": "string", "format": "date-time"},
-        "updatedAt": {"type": "string", "format": "date-time"},
-        "metadata": {"type": "string"}
-      },
-      "required": ["id", "agent", "project", "startedAt", "updatedAt", "metadata"]
-    },
-    "message": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "id": {"type": "string"},
-        "sessionId": {"type": "string"},
-        "role": {"type": "string", "enum": ["user", "assistant", "system", "tool"]},
-        "content": {"type": "string"},
-        "toolName": {"oneOf": [{"type": "string"}, {"type": "null"}]},
-        "tokens": {"oneOf": [{"type": "integer"}, {"type": "null"}]},
-        "timestamp": {"type": "string", "format": "date-time"},
-        "metadata": {"type": "string"}
-      },
-      "required": ["id", "sessionId", "role", "content", "toolName", "tokens", "timestamp", "metadata"]
-    },
-    "feedback": {
-      "type": "object",
-      "additionalProperties": false,
-      "properties": {
-        "id": {"type": "string"},
-        "topic": {"type": "string"},
-        "context": {"type": "string"},
-        "predicted": {"type": "string"},
-        "corrected": {"type": "string"},
-        "reason": {"oneOf": [{"type": "string"}, {"type": "null"}]},
-        "source": {"type": "string"},
-        "createdAt": {"type": "string", "format": "date-time"},
-        "appliedCount": {"type": "integer", "minimum": 0}
-      },
-      "required": ["id", "topic", "context", "predicted", "corrected", "reason", "source", "createdAt", "appliedCount"]
-    }
-  },
   "tools": {
     "icm_memory_recall": {
+      "$defs": {
+        "memory": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {"type": "string", "minLength": 1},
+            "createdAt": {"type": "string", "format": "date-time"},
+            "updatedAt": {"type": "string", "format": "date-time"},
+            "lastAccessed": {"type": "string", "format": "date-time"},
+            "accessCount": {"type": "integer", "minimum": 0},
+            "weight": {"type": "number"},
+            "topic": {"type": "string"},
+            "summary": {"type": "string"},
+            "rawExcerpt": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+            "rawExcerptTruncated": {"type": "boolean"},
+            "rawExcerptBytes": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]},
+            "keywords": {"type": "array", "items": {"type": "string"}},
+            "importance": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
+            "source": {
+              "oneOf": [
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {"type": {"const": "manual"}},
+                  "required": ["type"]
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "type": {"const": "conversation"},
+                    "threadId": {"type": "string"}
+                  },
+                  "required": ["type", "threadId"]
+                },
+                {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "type": {"const": "claudeCode"},
+                    "sessionId": {"type": "string"},
+                    "filePath": {"oneOf": [{"type": "string"}, {"type": "null"}]}
+                  },
+                  "required": ["type", "sessionId", "filePath"]
+                }
+              ]
+            },
+            "relatedIds": {"type": "array", "items": {"type": "string"}},
+            "scope": {"type": "string", "enum": ["user", "project", "org"]},
+            "score": {"oneOf": [{"type": "number"}, {"type": "null"}]}
+          },
+          "required": ["id", "createdAt", "updatedAt", "lastAccessed", "accessCount", "weight", "topic", "summary", "rawExcerpt", "rawExcerptTruncated", "rawExcerptBytes", "keywords", "importance", "source", "relatedIds", "scope", "score"]
+        }
+      },
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -153,6 +109,36 @@
       "required": ["messageId"]
     },
     "icm_transcript_search": {
+      "$defs": {
+        "message": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {"type": "string"},
+            "sessionId": {"type": "string"},
+            "role": {"type": "string", "enum": ["user", "assistant", "system", "tool"]},
+            "content": {"type": "string"},
+            "toolName": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+            "tokens": {"oneOf": [{"type": "integer"}, {"type": "null"}]},
+            "timestamp": {"type": "string", "format": "date-time"},
+            "metadata": {"type": "string"}
+          },
+          "required": ["id", "sessionId", "role", "content", "toolName", "tokens", "timestamp", "metadata"]
+        },
+        "session": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {"type": "string"},
+            "agent": {"type": "string"},
+            "project": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+            "startedAt": {"type": "string", "format": "date-time"},
+            "updatedAt": {"type": "string", "format": "date-time"},
+            "metadata": {"type": "string"}
+          },
+          "required": ["id", "agent", "project", "startedAt", "updatedAt", "metadata"]
+        }
+      },
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -173,6 +159,36 @@
       "required": ["hits"]
     },
     "icm_transcript_show": {
+      "$defs": {
+        "message": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {"type": "string"},
+            "sessionId": {"type": "string"},
+            "role": {"type": "string", "enum": ["user", "assistant", "system", "tool"]},
+            "content": {"type": "string"},
+            "toolName": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+            "tokens": {"oneOf": [{"type": "integer"}, {"type": "null"}]},
+            "timestamp": {"type": "string", "format": "date-time"},
+            "metadata": {"type": "string"}
+          },
+          "required": ["id", "sessionId", "role", "content", "toolName", "tokens", "timestamp", "metadata"]
+        },
+        "session": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {"type": "string"},
+            "agent": {"type": "string"},
+            "project": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+            "startedAt": {"type": "string", "format": "date-time"},
+            "updatedAt": {"type": "string", "format": "date-time"},
+            "metadata": {"type": "string"}
+          },
+          "required": ["id", "agent", "project", "startedAt", "updatedAt", "metadata"]
+        }
+      },
       "type": "object",
       "additionalProperties": false,
       "properties": {
@@ -220,8 +236,41 @@
       },
       "required": ["totalSessions", "totalMessages", "totalBytes", "byRole", "byAgent", "topSessions", "oldest", "newest"]
     },
-    "icm_feedback_record": {"$ref": "#/$defs/feedback"},
+    "icm_feedback_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"},
+        "topic": {"type": "string"},
+        "context": {"type": "string"},
+        "predicted": {"type": "string"},
+        "corrected": {"type": "string"},
+        "reason": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+        "source": {"type": "string"},
+        "createdAt": {"type": "string", "format": "date-time"},
+        "appliedCount": {"type": "integer", "minimum": 0}
+      },
+      "required": ["id", "topic", "context", "predicted", "corrected", "reason", "source", "createdAt", "appliedCount"]
+    },
     "icm_feedback_search": {
+      "$defs": {
+        "feedback": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "id": {"type": "string"},
+            "topic": {"type": "string"},
+            "context": {"type": "string"},
+            "predicted": {"type": "string"},
+            "corrected": {"type": "string"},
+            "reason": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+            "source": {"type": "string"},
+            "createdAt": {"type": "string", "format": "date-time"},
+            "appliedCount": {"type": "integer", "minimum": 0}
+          },
+          "required": ["id", "topic", "context", "predicted", "corrected", "reason", "source", "createdAt", "appliedCount"]
+        }
+      },
       "type": "object",
       "additionalProperties": false,
       "properties": {"feedback": {"type": "array", "items": {"$ref": "#/$defs/feedback"}}},
@@ -260,6 +309,8 @@
     "embeddingFieldForbiddenAtAnyDepth": true,
     "emptyCollectionsAreArrays": true,
     "nullableDomainScalarsArePresentNotOmitted": true,
-    "timestampsRetainUtcZSpelling": true
+    "timestampsRetainUtcZSpelling": true,
+    "advertisedSchemasIndependentlySelfContained": true,
+    "advertisedSchemaRootTypeObjectFor2025Projection": true
   }
 }

@@ -1,5 +1,5 @@
 {
-  "designVersion": 4,
+  "designVersion": 5,
   "designRevisions": [
     {"version": 1, "state": "initial preregistration before first untouched-baseline execution"},
     {"version": 2, "state": "pre-replacement harness correction after untouched-baseline dry run"},
@@ -17,16 +17,38 @@
         "every acceptance threshold has a typed exact-name executable binding",
         "resource, provider, and proxy contracts are expanded to their frozen architectural invariants"
       ]
+    },
+    {
+      "version": 5,
+      "state": "pre-candidate-execution preregistration defect correction after independent standards and phase-independence audits",
+      "changes": [
+        "each advertised per-tool outputSchema is independently self-contained under JSON Schema 2020-12",
+        "all 11 advertised per-tool outputSchema roots explicitly declare type object for MCP 2025-06-18 and 2025-11-25",
+        "the four remaining ref-using schemas carry only their required local $defs, feedback record is inlined at its object root, and the misleading outer $defs are removed",
+        "actual structured emissions are validated with the individual advertised schema as both resolver root and schema",
+        "design verification and the dedicated output-schema gate reject any schema without an explicit object root or any local $ref that does not resolve within that individual schema",
+        "Phase 2 tools/list and annotation gates do not require Phase 3 outputSchema; the closed-schema gate checks output closure only when outputSchema is present"
+      ]
     }
   ],
-  "frozenBeforeReplacementCode": true,
-  "candidateContext": "upstream-develop-only",
+  "initialDesignFrozenBeforeReplacementCode": true,
+  "versions1Through4FrozenBeforeReplacementCode": true,
+  "v5FrozenBeforeCandidateExecution": true,
+  "v5CandidateOutcomesObserved": false,
+  "v5CorrectionBasis": [
+    "official MCP outputSchema semantics",
+    "independently mergeable phase gates"
+  ],
+  "candidateContext": "Phase 2 replacement source existed during v5 correction; no candidate scenario outcomes were observed or used to tune acceptance",
   "scenarioCount": 326,
   "supersession": {
-    "authoritativeDesign": 4,
+    "authoritativeDesign": 5,
+    "v4AuthoritativeForReplacementAcceptance": false,
+    "v4Retention": "immutable historical audit evidence",
     "v3AuthoritativeForReplacementAcceptance": false,
     "v3Retention": "immutable historical audit evidence",
-    "reason": "v3 placed shortened metadata at the JSON-RPC top level and called discover, conflicting with the official 2026-07-28 request schema and method name"
+    "v4Reason": "five expected and advertised outputSchema objects contained local fragment refs whose $defs existed only in the evaluator wrapper, which MCP clients never receive",
+    "v3Reason": "v3 placed shortened metadata at the JSON-RPC top level and called discover, conflicting with the official 2026-07-28 request schema and method name"
   },
   "v3FrozenAudit": {
     "mcpSourceSha256": "fb8f7dda5c9a6a2cd31c14a990164095bffaac51179e62254e64565df04a45d8",
@@ -35,6 +57,15 @@
     "reportSha256": "abe5af9b28875a9ae202ad411c1fde52742ef09e085e77d4d9fce11a87c32327",
     "evidenceAggregateSha256": "a2a0f6754fb9574be8edcf1ff2781a5ba039b0907e8dc8d156ac0751c91463fe",
     "archiveManifestSha256": "7e2c0ad168ac9157930b4b137a80d7b1bbfa3b36850791ad97ea0bac38dcc9e5"
+  },
+  "v4FrozenAudit": {
+    "mcpSourceSha256": "264f1e5dd2cb3b1ead1afe31822ec1979b5cd81fe0d951f8fa86aee1893baf25",
+    "evaluateSourceSha256": "31b499c14b48b30b2e56f9ca115e17f3c858cf6eb915fbb388eb0a053a6cb9f4",
+    "fixturesSourceSha256": "24db4aac94ea841a89f6b78132655024e54aefaf323a537057a8a23d153782c3",
+    "designSha256": "1413774873830be5de2bd8b9c83b8283d769110dbc2b64c935c05eeb0b848e69",
+    "reportSha256": "38b972990470d5c7fe11d9ee44948183f5a3976ef4c7a35f061e873fdd025883",
+    "evidenceAggregateSha256": "8152b9e9ce84c146d510980172c2c583524b46272dacca18fd96440830f2a18c",
+    "archiveManifestSha256": "40fe855e5022cd09ab592199e845231a2b96bc5333daf68cc2db44c7953d1b69"
   },
   "officialSources": {
     "accessedAt": "2026-08-05",
@@ -405,7 +436,7 @@
     "legacyDeterministicParity": {"scenarioPrefix": "legacy.", "gate": "exact deterministic golden hash pass ratio"},
     "legacyCatalogOrderParity": {"scenario": "legacy.tools-list-order", "gate": "exact ordered catalog equality"},
     "legacyRequiredFieldParity": {"scenario": "legacy.tools-list-required-fields", "gate": "exact required-field equality"},
-    "modernSchemaCoverage": {"scenario": "modern.tools-list-output-schemas", "gate": "11 of 11 frozen modern schemas"},
+    "modernSchemaCoverage": {"scenario": "modern.tools-list-output-schemas", "gate": "11 of 11 exact advertised schemas explicitly have root type object and independently resolve every local ref"},
     "modernRequiredFieldCoverage": {"scenario": "modern.tools-list-required-fields", "gate": "all modern required fields"},
     "actualStructuredEmissionsValid": {"scenario": "modern.schema-valid-real-emissions", "gate": "11 of 11 real emissions"},
     "boundaryPassRate": {"scenarioPrefix": "boundary.", "gate": "boundary pass ratio"},

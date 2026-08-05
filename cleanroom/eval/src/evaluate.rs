@@ -4036,9 +4036,13 @@ fn validate_modern_tool_list(suite_root: &Path, id: &str, response: &Value) -> R
     let annotations: Value = serde_json::from_slice(&fs::read(
         suite_root.join("contracts/tool-annotations.json"),
     )?)?;
-    let schemas: Value = serde_json::from_slice(&fs::read(
-        suite_root.join("contracts/modern-output-schemas.json"),
-    )?)?;
+    let schemas = if id == "modern.tools-list-output-schemas" {
+        Some(serde_json::from_slice::<Value>(&fs::read(
+            suite_root.join("contracts/modern-output-schemas.json"),
+        )?)?)
+    } else {
+        None
+    };
     for tool in tools {
         let name = tool
             .get("name")
@@ -4065,16 +4069,26 @@ fn validate_modern_tool_list(suite_root: &Path, id: &str, response: &Value) -> R
         {
             anyhow::bail!("modern input schema for {name} is not closed");
         }
-        if let Some(expected) = schemas.pointer(&format!("/tools/{name}")) {
-            if tool.get("outputSchema") != Some(expected) {
+        if let Some(expected) = schemas
+            .as_ref()
+            .and_then(|schemas| schemas.pointer(&format!("/tools/{name}")))
+        {
+            let advertised = tool
+                .get("outputSchema")
+                .with_context(|| format!("modern outputSchema missing for {name}"))?;
+            schema::verify_independent_schema(advertised).with_context(|| {
+                format!("modern outputSchema for {name} is not independently self-contained")
+            })?;
+            if advertised != expected {
                 anyhow::bail!("modern outputSchema differs for {name}");
             }
-            if id == "modern.tools-list-closed-schemas"
-                && expected.get("additionalProperties") != Some(&Value::Bool(false))
-                && expected.get("$ref").is_none()
-            {
-                anyhow::bail!("modern output schema for {name} is not closed");
-            }
+        }
+        if id == "modern.tools-list-closed-schemas"
+            && tool.get("outputSchema").is_some_and(|advertised| {
+                advertised.get("additionalProperties") != Some(&Value::Bool(false))
+            })
+        {
+            anyhow::bail!("modern output schema for {name} is not closed");
         }
     }
     match id {
@@ -6441,11 +6455,76 @@ fn retrieval_meets_thresholds(
 mod tests {
     use super::*;
 
+    fn modern_tool_list_response_without_output_schemas() -> Value {
+        let suite = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let annotations: Value = serde_json::from_slice(
+            &fs::read(suite.join("contracts/tool-annotations.json")).unwrap(),
+        )
+        .unwrap();
+        let tools: Vec<_> = LEGACY_TOOLS
+            .iter()
+            .map(|name| {
+                json!({
+                    "name": name,
+                    "annotations": annotations.get(*name).unwrap(),
+                    "inputSchema": {
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {},
+                        "required": required_fields(name)
+                    }
+                })
+            })
+            .collect();
+        json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "resultType": "complete",
+                "tools": tools,
+                "ttlMs": 3_600_000,
+                "cacheScope": "private",
+                "_meta": {
+                    "io.modelcontextprotocol/serverInfo": {
+                        "name": "icm-test",
+                        "version": "0"
+                    }
+                }
+            }
+        })
+    }
+
     #[test]
     fn frozen_legacy_order_has_thirty_tools() {
         assert_eq!(LEGACY_TOOLS.len(), 30);
         assert_eq!(LEGACY_TOOLS.first(), Some(&"icm_memory_store"));
         assert_eq!(LEGACY_TOOLS.last(), Some(&"icm_wake_up"));
+    }
+
+    #[test]
+    fn phase_two_tool_list_gates_do_not_require_phase_three_output_schemas() {
+        let suite = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let response = modern_tool_list_response_without_output_schemas();
+        for id in [
+            "modern.tools-list-order",
+            "modern.tools-list-annotations",
+            "modern.tools-list-cache-metadata",
+            "modern.tools-list-required-fields",
+            "modern.tools-list-closed-schemas",
+            "modern.annotation-memory-store-destructive",
+            "modern.annotation-memory-recall-destructive",
+            "modern.annotation-read-only-consistency",
+            "modern.annotation-idempotence-consistency",
+            "modern.annotation-open-world-learn-only",
+        ] {
+            validate_modern_tool_list(suite, id, &response).unwrap_or_else(|error| {
+                panic!("{id} unexpectedly required outputSchema: {error:#}")
+            });
+        }
+        assert!(
+            validate_modern_tool_list(suite, "modern.tools-list-output-schemas", &response)
+                .is_err()
+        );
     }
 
     #[test]

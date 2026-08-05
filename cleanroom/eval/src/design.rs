@@ -8,6 +8,7 @@ use serde_json::Value;
 
 use crate::fixtures::{load_paths, load_providers};
 use crate::sandbox::{join_pure, sha256_bytes, sha256_file, REQUIRED_ENV};
+use crate::schema;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase")]
@@ -96,16 +97,46 @@ pub const ACCEPTANCE_THRESHOLD_KEYS: &[&str] = &[
 pub fn verify(suite_root: &Path) -> Result<DesignVerification> {
     let design: Value = read_json(&suite_root.join("contracts/preregistered-design.json"))?;
     if design
-        .get("frozenBeforeReplacementCode")
+        .get("initialDesignFrozenBeforeReplacementCode")
         .and_then(Value::as_bool)
         != Some(true)
+        || design
+            .get("versions1Through4FrozenBeforeReplacementCode")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || design
+            .get("v5FrozenBeforeCandidateExecution")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || design
+            .get("v5CandidateOutcomesObserved")
+            .and_then(Value::as_bool)
+            != Some(false)
     {
-        anyhow::bail!("design is not marked frozen-before-replacement-code");
+        anyhow::bail!("design freeze provenance differs from the frozen v5 record");
+    }
+    if design.get("v5CorrectionBasis")
+        != Some(&serde_json::json!([
+            "official MCP outputSchema semantics",
+            "independently mergeable phase gates"
+        ]))
+    {
+        anyhow::bail!("v5 correction basis differs from the frozen standards and phase audit");
+    }
+    if design.get("candidateContext").and_then(Value::as_str)
+        != Some(
+            "Phase 2 replacement source existed during v5 correction; no candidate scenario outcomes were observed or used to tune acceptance",
+        )
+    {
+        anyhow::bail!("v5 candidate context differs from the frozen provenance record");
     }
     let design_version = design
         .get("designVersion")
         .and_then(Value::as_u64)
         .context("missing designVersion")?;
+    if design_version != 5 {
+        anyhow::bail!("expected authoritative preregistration designVersion 5");
+    }
 
     verify_environment(&design)?;
     let fixture_hashes = verify_fixture_hashes(suite_root)?;
@@ -171,13 +202,18 @@ pub fn verify(suite_root: &Path) -> Result<DesignVerification> {
     }
 
     let schemas: Value = read_json(&suite_root.join("contracts/modern-output-schemas.json"))?;
-    let structured_tool_count = schemas
+    let structured_tools = schemas
         .get("tools")
         .and_then(Value::as_object)
-        .context("modern schemas missing tools")?
-        .len();
+        .context("modern schemas missing tools")?;
+    let structured_tool_count = structured_tools.len();
     if structured_tool_count != 11 {
         anyhow::bail!("expected 11 modern structured output schemas, got {structured_tool_count}");
+    }
+    for (tool, output_schema) in structured_tools {
+        schema::verify_independent_schema(output_schema).with_context(|| {
+            format!("frozen output schema for {tool} is not independently self-contained")
+        })?;
     }
     let golden: BTreeMap<String, String> = serde_json::from_slice(&fs::read(
         suite_root.join("goldens/legacy-baseline.sha256.json"),
@@ -434,7 +470,7 @@ fn verify_contracts(suite_root: &Path, design: &Value) -> Result<BTreeMap<String
             .and_then(Value::as_u64)
             != Some(2048)
     {
-        anyhow::bail!("offline MCP wire contract differs from the frozen v4 semantics");
+        anyhow::bail!("offline MCP wire contract differs from the frozen v5 semantics");
     }
     let design_urls: BTreeSet<_> = design
         .pointer("/officialSources/urls")
@@ -480,7 +516,7 @@ fn verify_contracts(suite_root: &Path, design: &Value) -> Result<BTreeMap<String
             .and_then(Value::as_bool)
             != Some(false)
     {
-        anyhow::bail!("proxy contract differs from the frozen v4 black-box contract");
+        anyhow::bail!("proxy contract differs from the frozen v5 black-box contract");
     }
     let normalization: Value = read_json(&suite_root.join("contracts/normalization-rules.json"))?;
     crate::normalization::verify_contract(&suite_root.join("contracts/normalization-rules.json"))?;

@@ -6,7 +6,52 @@ pub fn validate_tool_output(contract: &Value, tool: &str, actual: &Value) -> Res
     let schema = contract
         .pointer(&format!("/tools/{tool}"))
         .with_context(|| format!("no frozen output schema for {tool}"))?;
-    validate(contract, schema, actual, "$structuredContent")
+    verify_independent_schema(schema)
+        .with_context(|| format!("advertised output schema for {tool} is not self-contained"))?;
+    validate(schema, schema, actual, "$structuredContent")
+}
+
+/// Verify the MCP 2025 object-root requirement and every local reference
+/// against the individual advertised schema document. A tools/list consumer
+/// receives one `outputSchema` object, not the evaluator's outer contract
+/// wrapper, so outer definitions cannot satisfy a fragment reference on the
+/// wire.
+pub fn verify_independent_schema(schema: &Value) -> Result<()> {
+    if schema.get("type").and_then(Value::as_str) != Some("object") {
+        anyhow::bail!("advertised MCP 2025 outputSchema must explicitly have root type object");
+    }
+    verify_local_references(schema, schema, "$outputSchema")
+}
+
+fn verify_local_references(root: &Value, node: &Value, path: &str) -> Result<()> {
+    match node {
+        Value::Object(object) => {
+            if let Some(reference) = object.get("$ref") {
+                let reference = reference
+                    .as_str()
+                    .with_context(|| format!("{path}.$ref is not a string"))?;
+                let pointer = reference.strip_prefix('#').with_context(|| {
+                    format!("{path}.$ref is not a self-contained local reference: {reference}")
+                })?;
+                let target = root.pointer(pointer).with_context(|| {
+                    format!("{path}.$ref is unresolved in this schema document: {reference}")
+                })?;
+                if !target.is_object() && !target.is_boolean() {
+                    anyhow::bail!("{path}.$ref target is not a JSON Schema: {reference}");
+                }
+            }
+            for (key, child) in object {
+                verify_local_references(root, child, &format!("{path}.{key}"))?;
+            }
+        }
+        Value::Array(array) => {
+            for (index, child) in array.iter().enumerate() {
+                verify_local_references(root, child, &format!("{path}[{index}]"))?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
 }
 
 pub fn validate(root: &Value, schema: &Value, actual: &Value, path: &str) -> Result<()> {
@@ -155,5 +200,39 @@ mod tests {
     #[test]
     fn embeddings_are_rejected_at_any_depth() {
         assert!(reject_embedding(&json!({"nested": [{"embedding": [1.0]}]}), "$").is_err());
+    }
+
+    #[test]
+    fn advertised_schema_cannot_borrow_outer_definitions() {
+        let contract = json!({
+            "$defs": {"item": {"type": "object"}},
+            "tools": {"tool": {"type": "object", "$ref": "#/$defs/item"}}
+        });
+        let advertised = &contract["tools"]["tool"];
+        assert!(verify_independent_schema(advertised).is_err());
+        assert!(validate_tool_output(&contract, "tool", &json!({})).is_err());
+    }
+
+    #[test]
+    fn advertised_schema_requires_explicit_object_root_for_mcp_2025() {
+        assert!(verify_independent_schema(&json!({"$ref": "#"})).is_err());
+        assert!(verify_independent_schema(&json!({"type": "array"})).is_err());
+        assert!(verify_independent_schema(&json!({"type": "object"})).is_ok());
+    }
+
+    #[test]
+    fn every_frozen_advertised_schema_resolves_independently() {
+        let contract: Value = serde_json::from_slice(
+            &std::fs::read(
+                std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("contracts/modern-output-schemas.json"),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        for (tool, schema) in contract["tools"].as_object().unwrap() {
+            verify_independent_schema(schema)
+                .unwrap_or_else(|error| panic!("{tool} is not self-contained: {error:#}"));
+        }
     }
 }

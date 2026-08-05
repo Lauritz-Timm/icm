@@ -1,0 +1,142 @@
+{
+  "contractVersion": 1,
+  "accessedAt": "2026-08-05",
+  "trustedTools": ["icm_memory_recall", "icm_memory_store"],
+  "serverId": {
+    "installationScoped": true,
+    "newInstallMayUseLiteralIcm": false,
+    "alphabet": "lowercase-alphanumeric",
+    "normalizationMustBeInjective": true
+  },
+  "cli": {
+    "prefix": ["provider"],
+    "operations": ["trust", "strip", "doctor"],
+    "providers": ["codex", "claude-code", "cursor", "opencode", "zed"],
+    "scopes": ["project-local", "user"],
+    "nonInteractiveConfirmationFlag": "--yes",
+    "resolvedPlanOutputRequired": [
+      "paths",
+      "surface",
+      "scope",
+      "dialect",
+      "serverId",
+      "toolRules",
+      "blockingRules",
+      "ownershipDisposition"
+    ],
+    "resolvedPlanOutput": {
+      "encoding": "one JSON object on stdout",
+      "paths": "exact normalized paths for every registration and permission document in the selected scope",
+      "toolRules": "set equality with the two provider-specific trusted-tool rules",
+      "blockingRules": "set equality with all seeded deny, ask, confirm, default, and precedence blockers",
+      "ownershipDispositionItem": ["path", "rule", "disposition"],
+      "ownershipDispositionStates": ["new-owned", "preexisting-adopted", "blocked-existing", "owned-existing"]
+    },
+    "doctorTableCase": "exact-path-and-scope",
+    "doctorEveryProviderAndScope": true,
+    "topLevelDoctorPreserved": true
+  },
+  "providers": {
+    "codex": {
+      "projectPath": ".codex/config.toml",
+      "userPath": "$CODEX_HOME/config.toml",
+      "registration": "mcp_servers.<S>",
+      "trust": "mcp_servers.<S>.tools.<tool>.approval_mode=approve",
+      "enabledToolsExactWhenOwned": true,
+      "disabledToolsAppliedAfterEnabledTools": true,
+      "defaultApprovalModePreserved": true
+    },
+    "claude-code": {
+      "projectRegistrationPath": ".mcp.json",
+      "projectPermissionPath": ".claude/settings.local.json",
+      "userRegistrationPath": "~/.claude.json",
+      "userPermissionPath": "~/.claude/settings.json",
+      "trust": "mcp__<S>__<tool>",
+      "precedence": ["deny", "ask", "allow"]
+    },
+    "cursor": {
+      "projectRegistrationPath": ".cursor/mcp.json",
+      "projectPermissionPath": ".cursor/cli.json",
+      "userRegistrationPath": "~/.cursor/mcp.json",
+      "userPermissionPath": "~/.cursor/cli-config.json",
+      "trust": "Mcp(<S>:<tool>)",
+      "denyPrecedesAllow": true,
+      "ideTrust": "prompt-only"
+    },
+    "opencode": {
+      "projectPath": "opencode.json",
+      "userPath": "$XDG_CONFIG_HOME/opencode/opencode.json",
+      "registration": "mcp.servers.<S>",
+      "v2Trust": {"action": "<normalized-S>_<tool>", "resource": "*", "effect": "allow"},
+      "lastMatchingRuleWins": true,
+      "legacyDialectSeparate": true,
+      "mixedDialectReadOnly": true
+    },
+    "zed": {
+      "projectPath": ".zed/settings.json",
+      "userPath": "$XDG_CONFIG_HOME/zed/settings.json",
+      "registration": "context_servers.<S>",
+      "trust": "agent.tool_permissions.tools.mcp:<S>:<tool>.default=allow",
+      "preserve": ["global default", "always_deny", "always_confirm", "exact deny", "exact confirm"]
+    }
+  },
+  "ownershipManifest": {
+    "productionDefaults": {
+      "linux": "$XDG_DATA_HOME/icm/install-manifest.json",
+      "macos": "$HOME/Library/Application Support/icm/install-manifest.json",
+      "windows": "$APPDATA/icm/icm/data/install-manifest.json"
+    },
+    "version": 2,
+    "field": "providerOwnership",
+    "requiredEntryFields": [
+      "provider", "scope", "configPath", "surface", "rule", "preexisting", "owned",
+      "beforeHash", "afterHash", "writtenAt", "writerVersion"
+    ],
+    "uninstallDelegatesSharedLifecycle": true,
+    "uninstallCommand": "uninstall --yes --no-backup",
+    "uninstallIsDistinctFromStrip": true
+  },
+  "portableUserRoots": {
+    "codex": "CODEX_HOME when set, otherwise $HOME/.codex",
+    "claude-code": "CLAUDE_CONFIG_DIR when set, otherwise $HOME/.claude; user registration remains $HOME/.claude.json",
+    "cursor": "$HOME/.cursor",
+    "opencode": {
+      "linux": "$XDG_CONFIG_HOME/opencode",
+      "macos": "$HOME/Library/Application Support/opencode",
+      "windows": "$APPDATA/opencode"
+    },
+    "zed": {
+      "linux": "$XDG_CONFIG_HOME/zed",
+      "macos": "$HOME/Library/Application Support/Zed",
+      "windows": "$APPDATA/Zed"
+    }
+  },
+  "mutation": {
+    "explicitOptInOnly": true,
+    "restrictionsMonotone": true,
+    "losslessUnrelatedBytes": true,
+    "intentDurableBeforeTarget": true,
+    "targetReadbackBeforeNextTarget": true,
+    "hashAndSemanticRecovery": true,
+    "ownedExactRemovalOnly": true,
+    "externalEqualValuesAdoptedNotOwned": true,
+    "unknownOrMalformedOrAmbiguousZeroWrites": true,
+    "newerManifestReadOnly": true,
+    "schema1MigratesLegacyUnproven": true
+  },
+  "adversarialFixtures": {
+    "externalEqual": "exact registration and two trust rules are seeded in the selected real documents after doctor resolves serverId; manifest must mark them preexisting-adopted and not owned",
+    "shadowing": "the same serverId is seeded on the other documented scope's real registration and permission surfaces; selected binding must fail closed without writes",
+    "normalizationCollision": "raw server IDs icm-a and icm_a plus their exact dialect rules are seeded in the selected real documents",
+    "unknownDialect": "the selected real document contains a syntactically valid foreign or mixed documented permission grammar, not an ignored evaluator marker",
+    "ambiguousPath": "the same selected-scope directory contains both registry-recognized candidates with the same resolved serverId: config.toml plus config.local.toml for Codex, and .json plus .jsonc for JSON dialects",
+    "recognizedAmbiguousCandidates": {
+      "codex": ["config.toml", "config.local.toml"],
+      "claude-code": ["*.json", "*.jsonc"],
+      "cursor": ["*.json", "*.jsonc"],
+      "opencode": ["opencode.json", "opencode.jsonc"],
+      "zed": ["settings.json", "settings.jsonc"]
+    },
+    "windowsReparse": "non-shippable support injects privilege-free filesystem metadata and emits a journal; evaluator verifies the reparse attribute and unchanged target bytes"
+  }
+}

@@ -1,0 +1,265 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$defs": {
+    "memory": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string", "minLength": 1},
+        "createdAt": {"type": "string", "format": "date-time"},
+        "updatedAt": {"type": "string", "format": "date-time"},
+        "lastAccessed": {"type": "string", "format": "date-time"},
+        "accessCount": {"type": "integer", "minimum": 0},
+        "weight": {"type": "number"},
+        "topic": {"type": "string"},
+        "summary": {"type": "string"},
+        "rawExcerpt": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+        "rawExcerptTruncated": {"type": "boolean"},
+        "rawExcerptBytes": {"oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]},
+        "keywords": {"type": "array", "items": {"type": "string"}},
+        "importance": {"type": "string", "enum": ["critical", "high", "medium", "low"]},
+        "source": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {"type": {"const": "manual"}},
+              "required": ["type"]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "type": {"const": "conversation"},
+                "threadId": {"type": "string"}
+              },
+              "required": ["type", "threadId"]
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "type": {"const": "claudeCode"},
+                "sessionId": {"type": "string"},
+                "filePath": {"oneOf": [{"type": "string"}, {"type": "null"}]}
+              },
+              "required": ["type", "sessionId", "filePath"]
+            }
+          ]
+        },
+        "relatedIds": {"type": "array", "items": {"type": "string"}},
+        "scope": {"type": "string", "enum": ["user", "project", "org"]},
+        "score": {"oneOf": [{"type": "number"}, {"type": "null"}]}
+      },
+      "required": ["id", "createdAt", "updatedAt", "lastAccessed", "accessCount", "weight", "topic", "summary", "rawExcerpt", "rawExcerptTruncated", "rawExcerptBytes", "keywords", "importance", "source", "relatedIds", "scope", "score"]
+    },
+    "session": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"},
+        "agent": {"type": "string"},
+        "project": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+        "startedAt": {"type": "string", "format": "date-time"},
+        "updatedAt": {"type": "string", "format": "date-time"},
+        "metadata": {"type": "string"}
+      },
+      "required": ["id", "agent", "project", "startedAt", "updatedAt", "metadata"]
+    },
+    "message": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"},
+        "sessionId": {"type": "string"},
+        "role": {"type": "string", "enum": ["user", "assistant", "system", "tool"]},
+        "content": {"type": "string"},
+        "toolName": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+        "tokens": {"oneOf": [{"type": "integer"}, {"type": "null"}]},
+        "timestamp": {"type": "string", "format": "date-time"},
+        "metadata": {"type": "string"}
+      },
+      "required": ["id", "sessionId", "role", "content", "toolName", "tokens", "timestamp", "metadata"]
+    },
+    "feedback": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"},
+        "topic": {"type": "string"},
+        "context": {"type": "string"},
+        "predicted": {"type": "string"},
+        "corrected": {"type": "string"},
+        "reason": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+        "source": {"type": "string"},
+        "createdAt": {"type": "string", "format": "date-time"},
+        "appliedCount": {"type": "integer", "minimum": 0}
+      },
+      "required": ["id", "topic", "context", "predicted", "corrected", "reason", "source", "createdAt", "appliedCount"]
+    }
+  },
+  "tools": {
+    "icm_memory_recall": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "query": {"type": "string"},
+        "effectiveProject": {"oneOf": [{"type": "string"}, {"type": "null"}]},
+        "searchMode": {"type": "string", "enum": ["hybrid", "fullText", "keyword"]},
+        "memories": {"type": "array", "items": {"$ref": "#/$defs/memory"}}
+      },
+      "required": ["query", "effectiveProject", "searchMode", "memories"]
+    },
+    "icm_memory_list_topics": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "topics": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {"topic": {"type": "string"}, "count": {"type": "integer", "minimum": 0}},
+            "required": ["topic", "count"]
+          }
+        },
+        "totalTopics": {"type": "integer", "minimum": 0},
+        "totalMemories": {"type": "integer", "minimum": 0}
+      },
+      "required": ["topics", "totalTopics", "totalMemories"]
+    },
+    "icm_memory_stats": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "totalMemories": {"type": "integer", "minimum": 0},
+        "totalTopics": {"type": "integer", "minimum": 0},
+        "averageWeight": {"type": "number"},
+        "oldestMemory": {"oneOf": [{"type": "string", "format": "date-time"}, {"type": "null"}]},
+        "newestMemory": {"oneOf": [{"type": "string", "format": "date-time"}, {"type": "null"}]}
+      },
+      "required": ["totalMemories", "totalTopics", "averageWeight", "oldestMemory", "newestMemory"]
+    },
+    "icm_transcript_start_session": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {"sessionId": {"type": "string", "minLength": 1}},
+      "required": ["sessionId"]
+    },
+    "icm_transcript_record": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {"messageId": {"type": "string", "minLength": 1}},
+      "required": ["messageId"]
+    },
+    "icm_transcript_search": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "hits": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "message": {"$ref": "#/$defs/message"},
+              "session": {"$ref": "#/$defs/session"},
+              "score": {"type": "number"}
+            },
+            "required": ["message", "session", "score"]
+          }
+        }
+      },
+      "required": ["hits"]
+    },
+    "icm_transcript_show": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "session": {"$ref": "#/$defs/session"},
+        "messages": {"type": "array", "items": {"$ref": "#/$defs/message"}}
+      },
+      "required": ["session", "messages"]
+    },
+    "icm_transcript_stats": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "totalSessions": {"type": "integer", "minimum": 0},
+        "totalMessages": {"type": "integer", "minimum": 0},
+        "totalBytes": {"type": "integer", "minimum": 0},
+        "byRole": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {"role": {"type": "string"}, "count": {"type": "integer", "minimum": 0}},
+            "required": ["role", "count"]
+          }
+        },
+        "byAgent": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {"agent": {"type": "string"}, "count": {"type": "integer", "minimum": 0}},
+            "required": ["agent", "count"]
+          }
+        },
+        "topSessions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {"sessionId": {"type": "string"}, "messageCount": {"type": "integer", "minimum": 0}},
+            "required": ["sessionId", "messageCount"]
+          }
+        },
+        "oldest": {"oneOf": [{"type": "string", "format": "date-time"}, {"type": "null"}]},
+        "newest": {"oneOf": [{"type": "string", "format": "date-time"}, {"type": "null"}]}
+      },
+      "required": ["totalSessions", "totalMessages", "totalBytes", "byRole", "byAgent", "topSessions", "oldest", "newest"]
+    },
+    "icm_feedback_record": {"$ref": "#/$defs/feedback"},
+    "icm_feedback_search": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {"feedback": {"type": "array", "items": {"$ref": "#/$defs/feedback"}}},
+      "required": ["feedback"]
+    },
+    "icm_feedback_stats": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "total": {"type": "integer", "minimum": 0},
+        "byTopic": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {"topic": {"type": "string"}, "count": {"type": "integer", "minimum": 0}},
+            "required": ["topic", "count"]
+          }
+        },
+        "mostApplied": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {"feedbackId": {"type": "string"}, "count": {"type": "integer", "minimum": 0}},
+            "required": ["feedbackId", "count"]
+          }
+        }
+      },
+      "required": ["total", "byTopic", "mostApplied"]
+    }
+  },
+  "rules": {
+    "rootAndNestedAdditionalPropertiesFalse": true,
+    "propertyNamesCamelCase": true,
+    "embeddingFieldForbiddenAtAnyDepth": true,
+    "emptyCollectionsAreArrays": true,
+    "nullableDomainScalarsArePresentNotOmitted": true,
+    "timestampsRetainUtcZSpelling": true
+  }
+}

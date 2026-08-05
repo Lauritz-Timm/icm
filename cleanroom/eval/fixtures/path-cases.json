@@ -1,0 +1,10 @@
+{
+  "nativeRootNames": ["plain-root", "root with spaces", "røød-東京-🧪"],
+  "purePathCases": [
+    {"style": "posix", "base": "/synthetic/home with spaces", "relative": ".config/icm/config.toml", "expected": "/synthetic/home with spaces/.config/icm/config.toml"},
+    {"style": "posix", "base": "/synthetic/用户", "relative": ".local/share/icm", "expected": "/synthetic/用户/.local/share/icm"},
+    {"style": "windows", "base": "C:\\Synthetic User", "relative": "AppData\\Roaming\\icm", "expected": "C:\\Synthetic User\\AppData\\Roaming\\icm"},
+    {"style": "windows", "base": "D:\\测试", "relative": ".codex\\config.toml", "expected": "D:\\测试\\.codex\\config.toml"}
+  ]
+}
+

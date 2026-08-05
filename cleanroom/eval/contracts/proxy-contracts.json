@@ -1,0 +1,53 @@
+{
+  "contractVersion": 1,
+  "accessedAt": "2026-08-05",
+  "cli": {
+    "command": "proxy --url <base-url> [--compact] [--token-file <path>]",
+    "tokenEnvironment": "ICM_PROXY_TOKEN",
+    "inlineTokenFlagAllowed": false,
+    "credentialSourcesMutuallyExclusive": true
+  },
+  "endpoint": {
+    "scheme": "http",
+    "loopbackOnly": true,
+    "userinfoAllowed": false,
+    "fragmentAllowed": false,
+    "redirectsFollowed": false,
+    "dnsAddressesPinnedForProcessLifetime": true,
+    "ambientProxyEnvironmentHonored": false,
+    "pathSuffix": "mcp",
+    "compactQuery": "compact=true"
+  },
+  "http": {
+    "method": "POST",
+    "requestContentType": "application/json",
+    "acceptedResponseContentType": "application/json",
+    "host": "exact selected authority",
+    "origin": "absent",
+    "mcpProtocolVersion": "exact negotiated or per-request protocol era",
+    "mcpMethod": "exact JSON-RPC body method",
+    "mcpName": "exact params.name or empty string",
+    "legacy2025Session": "opaque Mcp-Session-Id from initialize response reused after notifications/initialized",
+    "modern2026Session": "absent",
+    "automaticRetries": 0,
+    "hopByHopHeadersForwarded": false,
+    "responseIdMustEqualRequestId": true,
+    "sseAccepted": false,
+    "utf8Required": true,
+    "completeBodyRequired": true,
+    "requestAndResponseBoundsRequired": true,
+    "timeoutRequired": true
+  },
+  "auth": {
+    "authorization": "Bearer <trimmed-token>",
+    "tokenFileWhitespaceTrimmed": true,
+    "redactFromStdoutStderrAndErrors": true
+  },
+  "evidence": {
+    "blackBoxCasesUseEvaluatorOwnedLoopbackDaemon": true,
+    "rawRequestsAndResponsesRequired": true,
+    "candidateSelfAttestationAccepted": false,
+    "internalObservationCases": ["proxy.proxy-zero-store-model", "proxy.dns-rebinding-target-pin"],
+    "internalObservationRequires": ["event journal", "counter artifact", "raw proxy exchange", "evaluator hash verification"]
+  }
+}

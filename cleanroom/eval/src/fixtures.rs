@@ -359,6 +359,32 @@ pub fn augment_resource_database(db_path: &Path, large: bool) -> Result<()> {
     Ok(())
 }
 
+/// Add 101 deterministic recall matches so the legacy compatibility probes can
+/// distinguish the historical `0 -> 1` and `101 -> 20` limit clamps from an
+/// unbounded or merely successful implementation.
+pub fn augment_boundary_limit_database(db_path: &Path) -> Result<()> {
+    let mut connection = Connection::open(db_path)?;
+    let transaction = connection.transaction()?;
+    for index in 0..101_u32 {
+        let id = format!("01J5{index:022}");
+        let summary = format!("boundaryclamp deterministic row {index:03}");
+        let weight = 1.0 - f64::from(index) / 1_000.0;
+        transaction.execute(
+            "INSERT INTO memories (
+                id, created_at, updated_at, last_accessed, access_count, weight,
+                topic, summary, raw_excerpt, keywords, importance, source_type,
+                source_data, related_ids, summary_hash, embedding
+             ) VALUES (?1, '2024-05-01T00:00:00Z', '2024-05-01T00:00:00Z',
+                       '2024-05-01T00:00:00Z', 0, ?2, 'context-eval-project',
+                       ?3, NULL, '[\"boundaryclamp\"]', 'medium', 'manual',
+                       NULL, '[]', NULL, NULL)",
+            params![id, weight, summary],
+        )?;
+    }
+    transaction.commit()?;
+    Ok(())
+}
+
 pub fn memory_access_count(db_path: &Path, id: &str) -> Result<Option<u32>> {
     let connection = Connection::open(db_path)?;
     let mut statement = connection.prepare("SELECT access_count FROM memories WHERE id = ?1")?;
@@ -492,6 +518,31 @@ mod tests {
         );
         let _ = fs::remove_file(first);
         let _ = fs::remove_file(second);
+        let _ = fs::remove_dir(root);
+    }
+
+    #[test]
+    fn boundary_limit_fixture_has_exactly_101_deterministic_matches() {
+        let suite = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let root = std::env::temp_dir().join(format!(
+            "icm-cleanroom-boundary-limit-fixture-{}",
+            std::process::id()
+        ));
+        let db = root.join("limits.sqlite3");
+        let _ = fs::remove_file(&db);
+        build_database(suite, &db, true).unwrap();
+        augment_boundary_limit_database(&db).unwrap();
+        let connection = Connection::open(&db).unwrap();
+        let count: u32 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE summary LIKE 'boundaryclamp %'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 101);
+        drop(connection);
+        let _ = fs::remove_file(db);
         let _ = fs::remove_dir(root);
     }
 }

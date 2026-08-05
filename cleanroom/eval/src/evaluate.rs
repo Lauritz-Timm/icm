@@ -14,9 +14,9 @@ use serde_json::{json, Value};
 
 use crate::design::{self, DesignVerification};
 use crate::fixtures::{
-    augment_resource_database, build_database, commit_resource_snapshot_writer, load_paths,
-    load_providers, load_quality, memory_access_count, FixtureState, ProviderCase,
-    ProviderDocumentFixture, ProviderFixture, ProviderScopeFixture,
+    augment_boundary_limit_database, augment_resource_database, build_database,
+    commit_resource_snapshot_writer, load_paths, load_providers, load_quality, memory_access_count,
+    FixtureState, ProviderCase, ProviderDocumentFixture, ProviderFixture, ProviderScopeFixture,
 };
 use crate::mcp::{
     error_code, modern_request, result, text_content, tool_call, tools_list, Exchange, McpClient,
@@ -2690,6 +2690,14 @@ impl Runner {
     }
 
     fn run_boundary(&mut self, id: &str) -> Result<ScenarioResult> {
+        match id {
+            "boundary.limit-under" => return self.run_boundary_limit(id, 0, 1),
+            "boundary.limit-over" => return self.run_boundary_limit(id, 101, 20),
+            "boundary.unknown-field" => return self.run_boundary_unknown_field(id),
+            "boundary.malformed-uri" => return self.run_boundary_malformed_uri(id),
+            _ => {}
+        }
+
         let execution = self.execute_mcp(id, McpExecutionConfig {
             populated: true,
             fixture_profile: FixtureProfile::Standard,
@@ -2719,11 +2727,6 @@ impl Runner {
                     2,
                     "icm_memory_store",
                     json!({"topic":"boundary","content":42}),
-                ))?,
-                "boundary.unknown-field" => client.request(tool_call(
-                    2,
-                    "icm_memory_store",
-                    json!({"topic":"boundary","content":"valid","unknownField":true}),
                 ))?,
                 "boundary.max-topic-255" => client.request(tool_call(
                     2,
@@ -2755,16 +2758,6 @@ impl Runner {
                     "icm_memory_recall",
                     json!({"query":"memory","project":"","limit":100}),
                 ))?,
-                "boundary.limit-under" => client.request(tool_call(
-                    2,
-                    "icm_memory_recall",
-                    json!({"query":"SQLite","project":"","limit":0}),
-                ))?,
-                "boundary.limit-over" => client.request(tool_call(
-                    2,
-                    "icm_memory_recall",
-                    json!({"query":"SQLite","project":"","limit":101}),
-                ))?,
                 "boundary.unicode" => client.request(tool_call(
                     2,
                     "icm_memory_recall",
@@ -2795,10 +2788,6 @@ impl Runner {
                     "icm_learn",
                     json!({"directory":"../","name":"path-traversal-attempt"}),
                 ))?,
-                "boundary.malformed-uri" => client.request(json!({
-                    "jsonrpc":"2.0","id":2,"method":"resources/read",
-                    "params":{"uri":"icm://../../real-user-state"}
-                }))?,
                 "boundary.oversized-line" => {
                     let oversized = format!(
                         "{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\",\"params\":{{\"padding\":\"{}\"}}}}",
@@ -2819,13 +2808,9 @@ impl Runner {
                     | "boundary.whitespace"
                     | "boundary.null"
                     | "boundary.wrong-json-type"
-                    | "boundary.unknown-field"
                     | "boundary.topic-256"
                     | "boundary.content-65537"
-                    | "boundary.limit-under"
-                    | "boundary.limit-over"
                     | "boundary.path-traversal"
-                    | "boundary.malformed-uri"
                     | "boundary.oversized-line"
             );
             let is_error = response.get("error").is_some()
@@ -2849,6 +2834,226 @@ impl Runner {
             }))
         })?;
         self.finish_execution(id, execution, false)
+    }
+
+    fn run_boundary_limit(
+        &mut self,
+        id: &str,
+        requested_limit: u64,
+        legacy_effective_limit: usize,
+    ) -> Result<ScenarioResult> {
+        let legacy = self.execute_mcp_leg(
+            id,
+            "legacy-2024",
+            McpExecutionConfig {
+                populated: true,
+                fixture_profile: FixtureProfile::BoundaryLimits,
+                compact: false,
+                init: Init::Legacy,
+                fault_database: false,
+            },
+            |client, _, _| {
+                let response = client.request(tool_call(
+                    2,
+                    "icm_memory_recall",
+                    json!({
+                        "query":"boundaryclamp",
+                        "project":"",
+                        "limit":requested_limit
+                    }),
+                ))?;
+                let observed_error = response.get("error").is_some()
+                    || response.pointer("/result/isError") == Some(&Value::Bool(true));
+                let observed_count = (!observed_error)
+                    .then(|| text_content(&response).map(|text| legacy_recall_result_count(&text)))
+                    .transpose()?;
+                let leg_passed = !observed_error && observed_count == Some(legacy_effective_limit);
+                Ok(json!({
+                    "legPassed":leg_passed,
+                    "protocolVersion":"2024-11-05",
+                    "requestedLimit":requested_limit,
+                    "expectedEffectiveLimit":legacy_effective_limit,
+                    "observedResultCount":observed_count,
+                    "expectedError":false,
+                    "observedError":observed_error,
+                    "responseBytes":serde_json::to_vec(&response)?.len()
+                }))
+            },
+        )?;
+
+        let modern = self.execute_mcp_leg(
+            id,
+            "modern-2026",
+            McpExecutionConfig {
+                populated: true,
+                fixture_profile: FixtureProfile::BoundaryLimits,
+                compact: false,
+                init: Init::None,
+                fault_database: false,
+            },
+            |client, _, _| {
+                let response = modern_tool_call(
+                    client,
+                    1,
+                    "icm_memory_recall",
+                    json!({
+                        "query":"boundaryclamp",
+                        "project":"",
+                        "limit":requested_limit
+                    }),
+                )?;
+                let observed_error_code = error_code(&response);
+                Ok(json!({
+                    "legPassed":observed_error_code == Some(-32602),
+                    "protocolVersion":"2026-07-28",
+                    "requestedLimit":requested_limit,
+                    "expectedErrorCode":-32602,
+                    "observedErrorCode":observed_error_code,
+                    "responseBytes":serde_json::to_vec(&response)?.len()
+                }))
+            },
+        )?;
+
+        self.finish_boundary_legs(id, [("legacy2024", legacy), ("modern2026", modern)])
+    }
+
+    fn run_boundary_unknown_field(&mut self, id: &str) -> Result<ScenarioResult> {
+        let arguments = json!({
+            "query":"SQLite WAL",
+            "project":"",
+            "limit":1,
+            "unknownField":true
+        });
+        let legacy_arguments = arguments.clone();
+        let legacy = self.execute_mcp_leg(
+            id,
+            "legacy-2024",
+            McpExecutionConfig {
+                populated: true,
+                fixture_profile: FixtureProfile::Standard,
+                compact: false,
+                init: Init::Legacy,
+                fault_database: false,
+            },
+            move |client, _, _| {
+                let response =
+                    client.request(tool_call(2, "icm_memory_recall", legacy_arguments))?;
+                let observed_error = response.get("error").is_some()
+                    || response.pointer("/result/isError") == Some(&Value::Bool(true));
+                let observed_count = (!observed_error)
+                    .then(|| text_content(&response).map(|text| legacy_recall_result_count(&text)))
+                    .transpose()?;
+                Ok(json!({
+                    "legPassed":!observed_error && observed_count == Some(1),
+                    "protocolVersion":"2024-11-05",
+                    "unknownFieldIgnored":true,
+                    "expectedError":false,
+                    "observedError":observed_error,
+                    "observedResultCount":observed_count,
+                    "responseBytes":serde_json::to_vec(&response)?.len()
+                }))
+            },
+        )?;
+        let modern = self.execute_mcp_leg(
+            id,
+            "modern-2026",
+            McpExecutionConfig {
+                populated: true,
+                fixture_profile: FixtureProfile::Standard,
+                compact: false,
+                init: Init::None,
+                fault_database: false,
+            },
+            move |client, _, _| {
+                let response = modern_tool_call(client, 1, "icm_memory_recall", arguments)?;
+                let observed_error_code = error_code(&response);
+                Ok(json!({
+                    "legPassed":observed_error_code == Some(-32602),
+                    "protocolVersion":"2026-07-28",
+                    "unknownFieldRejected":true,
+                    "expectedErrorCode":-32602,
+                    "observedErrorCode":observed_error_code,
+                    "responseBytes":serde_json::to_vec(&response)?.len()
+                }))
+            },
+        )?;
+        self.finish_boundary_legs(id, [("legacy2024", legacy), ("modern2026", modern)])
+    }
+
+    fn run_boundary_malformed_uri(&mut self, id: &str) -> Result<ScenarioResult> {
+        let modern = self.execute_mcp_leg(
+            id,
+            "modern-2026",
+            McpExecutionConfig {
+                populated: true,
+                fixture_profile: FixtureProfile::Resource,
+                compact: false,
+                init: Init::None,
+                fault_database: false,
+            },
+            |client, _, _| {
+                let response = client.request_2026(
+                    1,
+                    "resources/read",
+                    json!({"uri":"icm://../../real-user-state"}),
+                )?;
+                if error_code(&response) == Some(-32601) {
+                    return Ok(json!({
+                        "supported":false,
+                        "reason":"2026 resources/read is unavailable; method-not-found is not URI-validation evidence",
+                        "response":response
+                    }));
+                }
+                let observed_error_code = error_code(&response);
+                Ok(json!({
+                    "legPassed":observed_error_code == Some(-32602),
+                    "supported":true,
+                    "protocolVersion":"2026-07-28",
+                    "resourceMethodAvailable":true,
+                    "malformedUri":"icm://../../real-user-state",
+                    "expectedErrorCode":-32602,
+                    "observedErrorCode":observed_error_code,
+                    "methodNotFoundAccepted":false,
+                    "responseBytes":serde_json::to_vec(&response)?.len()
+                }))
+            },
+        )?;
+        if modern.detail.get("supported").and_then(Value::as_bool) == Some(false) {
+            return self.finish_unsupported(id, modern);
+        }
+        self.finish_boundary_legs(id, [("modern2026", modern)])
+    }
+
+    fn finish_boundary_legs<const N: usize>(
+        &self,
+        id: &str,
+        legs: [(&str, Execution); N],
+    ) -> Result<ScenarioResult> {
+        let mut detail = serde_json::Map::new();
+        let mut transcript = String::new();
+        let mut all_passed = true;
+        for (leg, execution) in legs {
+            all_passed &= execution
+                .detail
+                .get("legPassed")
+                .and_then(Value::as_bool)
+                .context("boundary leg detail lacks legPassed")?;
+            detail.insert(leg.to_owned(), execution.detail);
+            transcript.push_str(leg);
+            transcript.push('\n');
+            transcript.push_str(&execution.transcript);
+        }
+        let detail = Value::Object(detail);
+        if all_passed {
+            self.passed(id, detail, &transcript)
+        } else {
+            Ok(ScenarioResult {
+                id: id.to_owned(),
+                status: ScenarioStatus::Fail,
+                evidence_sha256: evidence_hash(&detail, &transcript)?,
+                detail,
+            })
+        }
     }
 
     fn run_metric(&mut self, id: &str) -> Result<ScenarioResult> {
@@ -3074,13 +3279,42 @@ impl Runner {
     where
         F: FnOnce(&mut McpClient, &FixtureState, &ScenarioSandbox) -> Result<Value>,
     {
+        self.execute_mcp_scoped(id, id, config, operation)
+    }
+
+    fn execute_mcp_leg<F>(
+        &mut self,
+        id: &str,
+        leg: &str,
+        config: McpExecutionConfig,
+        operation: F,
+    ) -> Result<Execution>
+    where
+        F: FnOnce(&mut McpClient, &FixtureState, &ScenarioSandbox) -> Result<Value>,
+    {
+        let scoped_id = format!("{id}.{leg}");
+        let raw_id = format!("{id}#{leg}");
+        self.execute_mcp_scoped(&scoped_id, &raw_id, config, operation)
+    }
+
+    fn execute_mcp_scoped<F>(
+        &mut self,
+        sandbox_id: &str,
+        raw_id: &str,
+        config: McpExecutionConfig,
+        operation: F,
+    ) -> Result<Execution>
+    where
+        F: FnOnce(&mut McpClient, &FixtureState, &ScenarioSandbox) -> Result<Value>,
+    {
         let sandbox =
-            ScenarioSandbox::create(&self.work_root, &self.run_label, id, config.compact)?;
+            ScenarioSandbox::create(&self.work_root, &self.run_label, sandbox_id, config.compact)?;
         let state = build_database(&self.suite_root, &sandbox.db, config.populated)?;
         match config.fixture_profile {
             FixtureProfile::Standard => {}
             FixtureProfile::Resource => augment_resource_database(&sandbox.db, false)?,
             FixtureProfile::ResourceLarge => augment_resource_database(&sandbox.db, true)?,
+            FixtureProfile::BoundaryLimits => augment_boundary_limit_database(&sandbox.db)?,
         }
         if config.fault_database {
             poison_memory_table(&sandbox.db)?;
@@ -3103,7 +3337,7 @@ impl Runner {
             &capture.stdout,
             &capture.stderr,
         )?;
-        self.record_raw(id, &capture.exchanges, &capture.stdout, &capture.stderr)?;
+        self.record_raw(raw_id, &capture.exchanges, &capture.stdout, &capture.stderr)?;
         let transcript = normalize_transcript(&capture.exchanges, &state);
         sandbox.verify()?;
         let detail = operation_result?;
@@ -3433,6 +3667,7 @@ enum FixtureProfile {
     Standard,
     Resource,
     ResourceLarge,
+    BoundaryLimits,
 }
 
 #[derive(Clone, Copy)]
@@ -4747,6 +4982,10 @@ fn require_tool_error(response: &Value) -> Result<()> {
         anyhow::bail!("expected MCP tool error: {response}");
     }
     Ok(())
+}
+
+fn legacy_recall_result_count(text: &str) -> usize {
+    text.lines().filter(|line| line.starts_with("--- ")).count()
 }
 
 fn require_error_code(response: &Value, expected: i64) -> Result<()> {
@@ -6500,6 +6739,15 @@ mod tests {
         assert_eq!(LEGACY_TOOLS.len(), 30);
         assert_eq!(LEGACY_TOOLS.first(), Some(&"icm_memory_store"));
         assert_eq!(LEGACY_TOOLS.last(), Some(&"icm_wake_up"));
+    }
+
+    #[test]
+    fn legacy_recall_result_count_uses_exact_wire_item_boundaries() {
+        assert_eq!(
+            legacy_recall_result_count("--- first ---\nsummary\n\n--- second ---\nsummary\n"),
+            2
+        );
+        assert_eq!(legacy_recall_result_count("no results\n"), 0);
     }
 
     #[test]

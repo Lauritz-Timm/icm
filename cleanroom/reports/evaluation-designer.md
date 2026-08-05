@@ -1,4 +1,4 @@
-# Clean-room evaluation design v6 and untouched baseline
+# Clean-room evaluation design v7 and untouched baseline
 
 Date: 2026-08-05  
 Role: independent evaluation designer  
@@ -7,7 +7,7 @@ Product changes: none
 
 ## Outcome
 
-The standalone evaluator under `cleanroom/eval` now implements the audited v6
+The standalone evaluator under `cleanroom/eval` now implements the audited v7
 design. It contains 326 preregistered scenarios and evaluates a real ICM binary
 against evaluator-owned SQLite/JSON fixtures, 29 exact legacy observations,
 closed modern schemas, provider lifecycle contracts, and deterministic
@@ -17,15 +17,15 @@ The corrected authoritative untouched-develop result is:
 
 | Status | Count | Meaning |
 |---|---:|---|
-| PASS | 71 | Untouched behavior met the preregistered contract |
+| PASS | 70 | Untouched behavior met the preregistered contract |
 | FAIL | 21 | Reproducible upstream protocol or boundary deficiencies |
-| UNSUPPORTED_BASELINE | 234 | Required replacement capability is absent, with concrete wire or CLI evidence |
-| Total | 326 | Complete v6 inventory |
+| UNSUPPORTED_BASELINE | 235 | Required replacement capability is absent, with concrete wire or CLI evidence |
+| Total | 326 | Complete v7 inventory |
 
 `portableAcceptance` is false for untouched `develop`, as expected. Candidate
 mode requires every scenario to pass. Replaying the untouched binary in
-candidate mode produced 71 PASS and 255 FAIL: the 21 observed deficiencies and
-all 234 unsupported capabilities became hard failures. All 71 baseline passes
+candidate mode produced 70 PASS and 256 FAIL: the 21 observed deficiencies and
+all 235 unsupported capabilities became hard failures. All 70 baseline passes
 remained passes, including all 29 exact deterministic legacy goldens.
 
 Versions 1 through 4 were frozen before replacement code. Phase 2 replacement
@@ -34,32 +34,54 @@ Version 5 was frozen before any candidate scenario execution, no candidate
 outcomes were observed or used to tune acceptance, and its correction basis was
 limited to official MCP output-schema semantics and independently mergeable
 phase gates. Version 6 was derived only from the official final MCP basic/schema
-and v1-v5 preregistration provenance: this audit inspected neither Phase 2
-source nor candidate outcomes and changed neither inventory nor thresholds. All
-authoritative evaluator-freeze evidence below evaluates the unchanged
-upstream-develop binary, not the changing Phase 2 product.
+and v1-v5 preregistration provenance: that audit inspected neither Phase 2
+source nor candidate outcomes and changed neither inventory nor thresholds.
+
+Phase 2 results existed and were compared for the bounded v7 correction. That
+comparison isolated the two limit scenarios whose v5/v6 outcomes changed while
+their candidate hashes differed; it was not used to select an expected product
+outcome. Version 7 inspected and changed only evaluator contracts, source,
+reports, and untouched-develop evidence. It did not inspect Phase 2 product
+source or execute the Phase 2 candidate. The correction basis was the
+evaluator's hardcoded legacy initialization for revision-sensitive boundary
+probes, the already-frozen legacy/modern architecture, and untouched-develop
+wire evidence. Inventory and thresholds remain unchanged. All authoritative
+evaluator-freeze evidence below evaluates the unchanged upstream-develop
+binary, not the Phase 2 product.
 
 ## Provenance and package health
 
 The evaluated ICM binary has SHA-256
 `8ec3c43899f6f899c230165026945b224ad9926f41ae6d618c6d473ad032e684`.
 The final evaluator binary has SHA-256
-`41d3e8d9a0d08f62f7b56cb7b803a248e1da1ebbc549b86682801498431b564d`.
-The v6 preregistered design has SHA-256
-`2b7a3dfdc6be85540fa2b4916c91d84f5879a5e48ce23f6be4c7d6bd9525cfba`.
+`a1ed404646d3522bfe55b69ce26f5dace388c66d4bf82928d8d43346197215b5`.
+The v7 preregistered design has SHA-256
+`632cc2658e5eec88f1c0c0bf17eab1f47e8b058234dc19bf1f3da4f212230f1b`.
 The evaluator source-tree aggregate, computed from the sorted
-`Cargo.toml`/`Cargo.lock`/`src`/`contracts`/`fixtures`/`goldens` file-hash list,
-is `e0377cbbc0abbd9aef87a4ff31718b543bd638dcc42ba39bc4f064a6ac46eaa0`.
+`Cargo.toml`/`Cargo.lock`/`src`/`contracts`/`fixtures`/`goldens` file-hash list
+relative to the evaluator root, is
+`91a822ea882f6d2623e1622b64c5eaa3d5261af85a188bcdda53a6be96db5d54`.
 Its independent lockfile has SHA-256
 `5c620c2c8f895a15524e8b4589246f72e9af67f59a3157f9c681d51380ac4993`.
+
+The v7-specific implementation hashes are:
+
+| File | SHA-256 |
+|---|---|
+| `src/design.rs` | `88e1b1d9d81b6b5e85e27c9ddd78ee5acacd10105370c84e6bb514d0450ea246` |
+| `src/evaluate.rs` | `c87e661d2fc2897099497a1afb3e81ea4f23fad3bf068bfa5fe5bb470472b817` |
+| `src/fixtures.rs` | `2f584505e536eff1aa41718fb26753f2f0130902be0091ac99331f0ece0e8959` |
+| `src/mcp.rs` | `8b45286f12752900dd167313c59c9e5c7198155a50a15905bf590573dc1b7db7` |
+| `src/schema.rs` | `94650877e0fd26b547c5df095a0f02506bfe9b3e5f3c4649fc764c84b95a8f4b` |
+| `contracts/checksums.sha256` | `bf835498b7b0533e1e9eed27a7a97d30b90771cab0b3eb3a1342e2c1b0bf3787` |
 
 The final evaluator passes:
 
 - `cargo fmt --check`;
 - locked, offline build and tests;
 - locked, offline clippy across all targets with warnings denied;
-- 32 evaluator-owned unit tests;
-- design verification at version 6: 326 scenarios, 31 tools, 11 structured
+- 34 evaluator-owned unit tests;
+- design verification at version 7: 326 scenarios, 31 tools, 11 structured
   tool schemas, 29 deterministic legacy goldens, five fixture files, seven
   contract files, and 30 typed threshold bindings;
 - a real-loopback, two-root self-test under one spaces path and one Unicode
@@ -71,11 +93,27 @@ and JSON fixtures. Product behavior is observed only by launching the separate
 candidate binary. No product source, repository lockfile, branch, commit, or
 remote was changed.
 
-## Frozen v6 contract
+## Frozen v7 contract
 
-Versions 1 through 5 remain immutable in their prior evidence and archives.
-Version 6 closes the final bounded lifecycle/metadata drift found by auditing
-only the official final MCP basic/schema and preregistration provenance:
+Versions 1 through 6 remain immutable in their prior evidence and archives.
+Version 7 corrects four boundary scenarios without changing their IDs, the
+326-scenario inventory, or any of the 30 typed thresholds:
+
+- `boundary.limit-under` and `boundary.limit-over` each launch separate 2024
+  and 2026 candidate processes. A deterministic 101-row matching fixture makes
+  the legacy observations exact: limit 0 returns one row and limit 101 returns
+  20 rows. The modern leg must reject either value with `-32602`;
+- `boundary.unknown-field` uses separate candidate processes. Its 2024 recall
+  leg must ignore the extra argument and return exactly one result, while its
+  2026 closed-schema leg must reject the same argument with `-32602`;
+- `boundary.malformed-uri` is a modern `resources/read` request. Only
+  `-32602` proves URI validation; `-32601` proves that the baseline lacks the
+  method and is classified `UNSUPPORTED_BASELINE`, never PASS;
+- every supported leg records `legPassed`, and raw evidence carries explicit
+  `#legacy-2024` and `#modern-2026` labels so no aggregate scenario status can
+  hide which revision was exercised.
+
+Version 6's bounded lifecycle/metadata corrections remain in force:
 
 - ICM's new application-defined era-lock and lifecycle errors are `-31010` and
   `-31011`, outside the final specification's `-32768..-32000` reserved range;
@@ -140,7 +178,7 @@ The frozen contract hashes are:
 | `mcp-2026-wire-contract.json` | `81fa75b803be52499befe18e7cb7e4f1ae78d4d2b110d54254a91dace12a60d4` |
 | `modern-output-schemas.json` | `640f018bab821ad1d81e3c10fa6c986eabc460fd763d2dc9a54539a88f0bee9c` |
 | `normalization-rules.json` | `d2f012a84b713fed7a364368c7453df70f0f2dbf53eb313b20f2c1ddb39e8245` |
-| `preregistered-design.json` | `2b7a3dfdc6be85540fa2b4916c91d84f5879a5e48ce23f6be4c7d6bd9525cfba` |
+| `preregistered-design.json` | `632cc2658e5eec88f1c0c0bf17eab1f47e8b058234dc19bf1f3da4f212230f1b` |
 | `provider-contracts.json` | `e4e51d09f0ac5ec3fe9e9ae02a254c86c6f38f61c3271a77ff7dbe61c2cf7a37` |
 | `proxy-contracts.json` | `77c3ec5e536c9a1dc3538eeb7b3274929e16d4d58a62aa5238dce57d1828840e` |
 | `tool-annotations.json` | `a09b9be52596d9c1c4de061f6a424bda556550122c6557a96c02279688dbf7ff` |
@@ -248,29 +286,29 @@ The authoritative evidence tree contains neither the inherited home path nor
 the `ICM_EVAL_CANARY_V4_` prefix. Every result's embedded raw-exchange hash was
 recomputed against its sibling JSONL file.
 
-## Authoritative v6 evidence
+## Authoritative v7 evidence
 
 The spaces/Unicode two-root reports are byte-identical after only the frozen
 normalization allowlist:
 
-`4de6db44dddaabdd502b1bc2fa0e74e1ff76f575fde16a8f8f4985369656e96c`
+`e2d8c377f05ebfea9a40a95f5a46afa34541ba43b8ef6002320f752a80f815f3`
 
-Artifacts relative to the v6 evidence root:
+Artifacts relative to the v7 evidence root:
 
 | Artifact | SHA-256 |
 |---|---|
-| `authoritative-untouched-develop-v6-result.json` | `3398b3537aec90905ed10c8f03446a6587b31cc805c627d71500e9c95abb898c` |
-| `authoritative-untouched-develop-v6-raw-exchanges.jsonl` | `ff28823fb452fa98125067ddba1711b9f7e28b2874c9a24104bae5c8374cdfec` |
-| `authoritative-hermetic-two-root-v6-result.json` | `7c9a02a6276d318ba36e6065ce44e81231f171de3d163d6f150cabf9f57fbbfb` |
-| `authoritative-hermetic-two-root-v6-root-1-result.json` | `7bbfd41646c63ae0c6932b2dfe23f3f42f0a931f48e402da6a9e00c59fcda6af` |
-| `authoritative-hermetic-two-root-v6-root-1-raw-exchanges.jsonl` | `9e1cc8a3a4ad1284276519537cb66090a52e91df4699420ea1a89ab688f4e22a` |
-| `authoritative-hermetic-two-root-v6-root-2-result.json` | `1f096b6ad2e11cabbae7cb069f5b08cb825bc28ce28783b60a90feff83b40d2d` |
-| `authoritative-hermetic-two-root-v6-root-2-raw-exchanges.jsonl` | `d912b040c50344bc002a7bf75503caad3092cc59c053a8ea8f82ff24479d6919` |
-| `authoritative-golden-replay-v6-result.json` | `9f36e6e809e632ab2fadc7f68ebbe5da1fb993d65be0e68e0676d0dd5ab53b1c` |
-| `authoritative-golden-replay-v6-raw-exchanges.jsonl` | `bac6f37c0379dc80bbe7286891cc201bc5af165af28b8f371cbf54d01b8df858` |
+| `authoritative-untouched-develop-v7-result.json` | `c833cc9f266e911d93ec9d428b8783b205f6da136ff3c690c198758602544b8c` |
+| `authoritative-untouched-develop-v7-raw-exchanges.jsonl` | `b111c0fdd5b9993a5630668c934648b81680813321f4c985f00d2350acf8cd19` |
+| `authoritative-hermetic-two-root-v7-result.json` | `dc1841dd395f4123f7eeea5ac163cf50e8afde776cd23d2930e44422a37243cc` |
+| `authoritative-hermetic-two-root-v7-root-1-result.json` | `1e932ab77425f9e7c7c3d342bfc23f785d8c8354adbcc192434b6149d96e6ff5` |
+| `authoritative-hermetic-two-root-v7-root-1-raw-exchanges.jsonl` | `fae6c7103f78483ca82f4f5a97d8eb301383057f87e7746ae1ddfbea3e23c440` |
+| `authoritative-hermetic-two-root-v7-root-2-result.json` | `baca565ec6177b9afb3cf97f758b24ae2bc4a79adbaa6089c552bdcd32afc836` |
+| `authoritative-hermetic-two-root-v7-root-2-raw-exchanges.jsonl` | `b72b7f43dc74a2a36b3dbcbbd522ea64321086d18cab50acf73947db99a8ed0c` |
+| `authoritative-golden-replay-v7-result.json` | `abb9a571dd39152ba8506720ad65e487e49488a55428bebf0b5cd4d00a90f3ad` |
+| `authoritative-golden-replay-v7-raw-exchanges.jsonl` | `3155fdacb3189246b6a257eda4fa627a70911c233def7dc660102670b645f982` |
 
-The aggregate over the sorted nine-file evidence hash list is
-`8cfa8284cbe897a1c2db58f613b86d511f6d05c17234e666810fced7d9afd63c`.
+The aggregate over the lexicographically ordered nine-file `sha256sum` output
+is `2a40188274847691dd089612a96e31c885962baeeafe2d3374aff3fef7656e56`.
 
 ## Baseline measurements
 
@@ -280,9 +318,9 @@ samples produced these host observations in microseconds:
 
 | Operation | Median | p95 |
 |---|---:|---:|
-| tools/list | 1,446 | 1,560 |
-| memory/recall | 1,435 | 1,554 |
-| memory/stats | 102 | 154 |
+| tools/list | 1,450 | 1,730 |
+| memory/recall | 1,387 | 1,589 |
+| memory/stats | 101 | 126 |
 
 Retrieval over six committed queries remained perfect: Hit@3 1.0, Recall@3
 1.0, and nDCG@3 1.0. Latency is measured but interpreted with the frozen ratio,
@@ -302,7 +340,7 @@ The baseline distribution by area is:
 | Provider black box | 100 | 0 | 0 | 100 |
 | Provider engine integrity | 15 | 0 | 0 | 15 |
 | Proxy/daemon | 45 | 1 | 0 | 44 |
-| Boundaries | 22 | 18 | 4 | 0 |
+| Boundaries | 22 | 17 | 4 | 1 |
 | Metrics | 3 | 3 | 0 | 0 |
 
 The 21 reproducible failures are six lifecycle-state violations, eleven
@@ -326,13 +364,24 @@ deficiencies:
 15. read-only annotation consistency is wrong or absent;
 16. idempotence annotation consistency is wrong or absent;
 17. the open-world learn-only annotation contract is wrong or absent;
-18. `boundary.unknown-field` accepts an unrecognized store field;
-19. `boundary.limit-under` silently accepts/clamps recall limit 0;
-20. `boundary.limit-over` silently accepts/clamps recall limit 101;
-21. `boundary.path-traversal` accepts `../` inside the synthetic probe tree.
+18. the modern leg of `boundary.unknown-field` accepts an unrecognized recall
+    argument instead of returning `-32602`;
+19. the modern leg of `boundary.limit-under` accepts/clamps recall limit 0
+    instead of returning `-32602`;
+20. the modern leg of `boundary.limit-over` accepts/clamps recall limit 101
+    instead of returning `-32602`;
+21. the legacy `boundary.path-traversal` probe accepts `../` inside the
+    synthetic probe tree.
 
-The 234 unsupported statuses comprise 38 modern, 37 resource, 115 provider,
-and 44 proxy/daemon scenarios. Each carries its own concrete CLI or wire proof.
+The corresponding 2024 legs for unknown-field and both limit scenarios pass:
+the extra recall argument is ignored with one result, and limits 0 and 101
+produce exactly one and 20 results. The malformed-URI scenario is not among
+the failures: its modern `resources/read` probe returned `-32601`, concrete
+evidence that the baseline lacks the method but no evidence of URI validation.
+
+The 235 unsupported statuses comprise 38 modern, 37 resource, 115 provider,
+44 proxy/daemon, and one boundary scenario. Each carries its own concrete CLI
+or wire proof.
 
 ## Replacement acceptance and archive
 

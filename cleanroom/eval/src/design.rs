@@ -133,7 +133,7 @@ pub fn verify(suite_root: &Path) -> Result<DesignVerification> {
             .and_then(Value::as_bool)
             != Some(false)
     {
-        anyhow::bail!("design freeze provenance differs from the frozen v6 record");
+        anyhow::bail!("design freeze provenance differs from the frozen v1-v6 record");
     }
     if design.get("v5CorrectionBasis")
         != Some(&serde_json::json!([
@@ -143,7 +143,7 @@ pub fn verify(suite_root: &Path) -> Result<DesignVerification> {
     {
         anyhow::bail!("v5 correction basis differs from the frozen standards and phase audit");
     }
-    if design.get("candidateContext").and_then(Value::as_str)
+    if design.get("v6CandidateContext").and_then(Value::as_str)
         != Some(
             "Phase 2 replacement source existed; v6 was derived only from the official final MCP basic/schema and v1-v5 preregistration provenance, without inspecting Phase 2 source or candidate outcomes",
         )
@@ -159,12 +159,50 @@ pub fn verify(suite_root: &Path) -> Result<DesignVerification> {
     {
         anyhow::bail!("v6 correction basis differs from the bounded official-spec audit");
     }
+    if design.get("v7IntegrityAudit")
+        != Some(&serde_json::json!({
+            "phase2ProductSourceInspected": false,
+            "phase2CandidateExecuted": false,
+            "candidateResultsCompared": true,
+            "untouchedDevelopEvidenceUsed": true,
+            "scenarioInventoryChanged": false,
+            "acceptanceThresholdsChanged": false,
+            "correctionBasis": [
+                "the evaluator source hardcoded Init::Legacy for all boundary probes",
+                "the frozen architecture requires exact 2024 compatibility and closed modern validation",
+                "v5 and v6 result comparison isolated boundary.limit-under and boundary.limit-over as the only status deltas while candidate binary hashes differed",
+                "untouched develop raw exchanges prove historical 2024 limit clamping and unknown-field tolerance",
+                "the v6 malformed-URI probe returned method-not-found under 2024 and therefore never exercised URI validation"
+            ]
+        }))
+    {
+        anyhow::bail!("v7 correction provenance differs from the frozen boundary-era audit");
+    }
+    if design.get("candidateContext").and_then(Value::as_str)
+        != Some(
+            "Phase 2 replacement results existed and were compared for v7, but v7 inspected and changed only evaluator contracts, source, reports, and untouched-develop evidence; Phase 2 product source was not inspected and the Phase 2 candidate was not executed",
+        )
+    {
+        anyhow::bail!("v7 candidate context differs from the frozen provenance record");
+    }
+    if design
+        .pointer("/supersession/authoritativeDesign")
+        .and_then(Value::as_u64)
+        != Some(7)
+        || design
+            .pointer("/supersession/v6AuthoritativeForReplacementAcceptance")
+            .and_then(Value::as_bool)
+            != Some(false)
+    {
+        anyhow::bail!("v7 supersession record is not authoritative");
+    }
+    verify_boundary_revision_semantics(&design)?;
     let design_version = design
         .get("designVersion")
         .and_then(Value::as_u64)
         .context("missing designVersion")?;
-    if design_version != 6 {
-        anyhow::bail!("expected authoritative preregistration designVersion 6");
+    if design_version != 7 {
+        anyhow::bail!("expected authoritative preregistration designVersion 7");
     }
 
     verify_environment(&design)?;
@@ -326,6 +364,73 @@ pub fn verify(suite_root: &Path) -> Result<DesignVerification> {
 
 pub fn load_design(suite_root: &Path) -> Result<Value> {
     read_json(&suite_root.join("contracts/preregistered-design.json"))
+}
+
+fn verify_boundary_revision_semantics(design: &Value) -> Result<()> {
+    let expected = serde_json::json!({
+        "scenarioInventoryUnchanged": true,
+        "acceptanceThresholdsUnchanged": true,
+        "separateCandidateProcessPerLeg": true,
+        "eachSupportedLegRecordsLegPassed": true,
+        "invalidParamsCode": -32602,
+        "multiLegScenarios": {
+            "boundary.limit-under": {
+                "legacy2024": {
+                    "requestLimit": 0,
+                    "expectedEffectiveLimit": 1,
+                    "expectedError": false,
+                    "deterministicMatchingRows": 101
+                },
+                "modern2026": {
+                    "requestLimit": 0,
+                    "expectedErrorCode": -32602,
+                    "metadataOnEveryRequest": true
+                }
+            },
+            "boundary.limit-over": {
+                "legacy2024": {
+                    "requestLimit": 101,
+                    "expectedEffectiveLimit": 20,
+                    "expectedError": false,
+                    "deterministicMatchingRows": 101
+                },
+                "modern2026": {
+                    "requestLimit": 101,
+                    "expectedErrorCode": -32602,
+                    "metadataOnEveryRequest": true
+                }
+            },
+            "boundary.unknown-field": {
+                "tool": "icm_memory_recall",
+                "field": "unknownField",
+                "legacy2024": {
+                    "unknownFieldIgnored": true,
+                    "expectedError": false,
+                    "expectedResultCount": 1
+                },
+                "modern2026": {
+                    "unknownFieldRejected": true,
+                    "expectedErrorCode": -32602,
+                    "metadataOnEveryRequest": true
+                }
+            }
+        },
+        "modernOnlyScenarios": {
+            "boundary.malformed-uri": {
+                "protocolVersion": "2026-07-28",
+                "method": "resources/read",
+                "uri": "icm://../../real-user-state",
+                "expectedErrorCode": -32602,
+                "methodNotFoundAccepted": false,
+                "methodNotFoundBaselineClassification": "UNSUPPORTED_BASELINE",
+                "metadataOnEveryRequest": true
+            }
+        }
+    });
+    if design.get("boundaryRevisionSemantics") != Some(&expected) {
+        anyhow::bail!("boundary revision semantics differ from the frozen v7 contract");
+    }
+    Ok(())
 }
 
 pub fn expected_scenarios(design: &Value) -> Result<Vec<String>> {

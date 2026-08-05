@@ -1,5 +1,5 @@
 {
-  "designVersion": 6,
+  "designVersion": 7,
   "designRevisions": [
     {"version": 1, "state": "initial preregistration before first untouched-baseline execution"},
     {"version": 2, "state": "pre-replacement harness correction after untouched-baseline dry run"},
@@ -40,6 +40,16 @@
         "same-process era-switch rejection remains an explicit ICM stdio compatibility policy rather than an MCP-mandated error behavior; 2026 requests remain stateless",
         "scenario inventory and acceptance thresholds are unchanged"
       ]
+    },
+    {
+      "version": 7,
+      "state": "bounded evaluator-only boundary-era integrity correction after v6 candidate-result comparison",
+      "changes": [
+        "boundary.limit-under and boundary.limit-over each use separate 2024 and 2026 candidate processes: 2024 must preserve exact 0-to-1 and 101-to-20 recall normalization while 2026 must reject both values with invalid params",
+        "boundary.unknown-field uses separate processes: the 2024 compatibility leg must ignore an extra recall argument while the 2026 closed-schema leg must reject it with invalid params",
+        "boundary.malformed-uri is a 2026 per-request resources/read probe and must reject the malformed URI with invalid params; method-not-found is never accepted as URI-validation evidence",
+        "all four corrections remain inside their existing scenario IDs, so the 326-scenario inventory and all 30 acceptance thresholds are unchanged"
+      ]
     }
   ],
   "initialDesignFrozenBeforeReplacementCode": true,
@@ -61,16 +71,35 @@
       "official final MCP 2026-07-28 dual-era compatibility semantics"
     ]
   },
-  "candidateContext": "Phase 2 replacement source existed; v6 was derived only from the official final MCP basic/schema and v1-v5 preregistration provenance, without inspecting Phase 2 source or candidate outcomes",
+  "v7IntegrityAudit": {
+    "phase2ProductSourceInspected": false,
+    "phase2CandidateExecuted": false,
+    "candidateResultsCompared": true,
+    "untouchedDevelopEvidenceUsed": true,
+    "scenarioInventoryChanged": false,
+    "acceptanceThresholdsChanged": false,
+    "correctionBasis": [
+      "the evaluator source hardcoded Init::Legacy for all boundary probes",
+      "the frozen architecture requires exact 2024 compatibility and closed modern validation",
+      "v5 and v6 result comparison isolated boundary.limit-under and boundary.limit-over as the only status deltas while candidate binary hashes differed",
+      "untouched develop raw exchanges prove historical 2024 limit clamping and unknown-field tolerance",
+      "the v6 malformed-URI probe returned method-not-found under 2024 and therefore never exercised URI validation"
+    ]
+  },
+  "v6CandidateContext": "Phase 2 replacement source existed; v6 was derived only from the official final MCP basic/schema and v1-v5 preregistration provenance, without inspecting Phase 2 source or candidate outcomes",
+  "candidateContext": "Phase 2 replacement results existed and were compared for v7, but v7 inspected and changed only evaluator contracts, source, reports, and untouched-develop evidence; Phase 2 product source was not inspected and the Phase 2 candidate was not executed",
   "scenarioCount": 326,
   "supersession": {
-    "authoritativeDesign": 6,
+    "authoritativeDesign": 7,
+    "v6AuthoritativeForReplacementAcceptance": false,
+    "v6Retention": "immutable historical audit evidence",
     "v5AuthoritativeForReplacementAcceptance": false,
     "v5Retention": "immutable historical audit evidence",
     "v4AuthoritativeForReplacementAcceptance": false,
     "v4Retention": "immutable historical audit evidence",
     "v3AuthoritativeForReplacementAcceptance": false,
     "v3Retention": "immutable historical audit evidence",
+    "v6Reason": "v6 sent revision-sensitive boundary probes through 2024 initialization while applying modern-only rejection expectations, and malformed URI passed for method unavailability rather than URI validation",
     "v5Reason": "v5 newly allocated -32010/-32011 in the final specification legacy sub-range and treated syntactically valid bare _meta key invalid as malformed",
     "v4Reason": "five expected and advertised outputSchema objects contained local fragment refs whose $defs existed only in the evaluator wrapper, which MCP clients never receive",
     "v3Reason": "v3 placed shortened metadata at the JSON-RPC top level and called discover, conflicting with the official 2026-07-28 request schema and method name"
@@ -107,6 +136,21 @@
     "evidenceAggregateSha256": "5f586b473e64471f71b063010ba4551a057ff4078373b252ba5f1c38bf78a03c",
     "archiveManifestSha256": "6d15d6bb8e832c86c30bac2383202737e775ff99389e1a9941b7883ee610d239"
   },
+  "v6FrozenAudit": {
+    "mcpSourceSha256": "8b45286f12752900dd167313c59c9e5c7198155a50a15905bf590573dc1b7db7",
+    "evaluateSourceSha256": "f58f899da1a08edc416341815e1e4a4afb736589e730a9111e3e13edd147ef04",
+    "designSourceSha256": "798cfd7b49e171cc3f7370dd2a4161d93d86eb2a42130ccd8c2419258854d1a6",
+    "schemaSourceSha256": "94650877e0fd26b547c5df095a0f02506bfe9b3e5f3c4649fc764c84b95a8f4b",
+    "fixturesSourceSha256": "24db4aac94ea841a89f6b78132655024e54aefaf323a537057a8a23d153782c3",
+    "wireContractSha256": "81fa75b803be52499befe18e7cb7e4f1ae78d4d2b110d54254a91dace12a60d4",
+    "modernSchemasSha256": "640f018bab821ad1d81e3c10fa6c986eabc460fd763d2dc9a54539a88f0bee9c",
+    "designSha256": "2b7a3dfdc6be85540fa2b4916c91d84f5879a5e48ce23f6be4c7d6bd9525cfba",
+    "evaluatorBinarySha256": "41d3e8d9a0d08f62f7b56cb7b803a248e1da1ebbc549b86682801498431b564d",
+    "sourceTreeAggregateSha256": "e0377cbbc0abbd9aef87a4ff31718b543bd638dcc42ba39bc4f064a6ac46eaa0",
+    "reportSha256": "6f7dd1b19a088c4d2107349cac43f0e73dec5cecb614c0fabd45478e1c00a264",
+    "evidenceAggregateSha256": "8cfa8284cbe897a1c2db58f613b86d511f6d05c17234e666810fced7d9afd63c",
+    "archiveManifestSha256": "3a83db0d6b5d2c0e2705786db88a9dc252af591072f582e0e81803e2dc47ea7b"
+  },
   "officialSources": {
     "accessedAt": "2026-08-05",
     "runtimeNetworkRequired": false,
@@ -131,6 +175,66 @@
       "code": -31010,
       "message": "protocol era is locked for this connection; open a new connection",
       "data": ["kind", "selectedEra", "requestedEra"]
+    }
+  },
+  "boundaryRevisionSemantics": {
+    "scenarioInventoryUnchanged": true,
+    "acceptanceThresholdsUnchanged": true,
+    "separateCandidateProcessPerLeg": true,
+    "eachSupportedLegRecordsLegPassed": true,
+    "invalidParamsCode": -32602,
+    "multiLegScenarios": {
+      "boundary.limit-under": {
+        "legacy2024": {
+          "requestLimit": 0,
+          "expectedEffectiveLimit": 1,
+          "expectedError": false,
+          "deterministicMatchingRows": 101
+        },
+        "modern2026": {
+          "requestLimit": 0,
+          "expectedErrorCode": -32602,
+          "metadataOnEveryRequest": true
+        }
+      },
+      "boundary.limit-over": {
+        "legacy2024": {
+          "requestLimit": 101,
+          "expectedEffectiveLimit": 20,
+          "expectedError": false,
+          "deterministicMatchingRows": 101
+        },
+        "modern2026": {
+          "requestLimit": 101,
+          "expectedErrorCode": -32602,
+          "metadataOnEveryRequest": true
+        }
+      },
+      "boundary.unknown-field": {
+        "tool": "icm_memory_recall",
+        "field": "unknownField",
+        "legacy2024": {
+          "unknownFieldIgnored": true,
+          "expectedError": false,
+          "expectedResultCount": 1
+        },
+        "modern2026": {
+          "unknownFieldRejected": true,
+          "expectedErrorCode": -32602,
+          "metadataOnEveryRequest": true
+        }
+      }
+    },
+    "modernOnlyScenarios": {
+      "boundary.malformed-uri": {
+        "protocolVersion": "2026-07-28",
+        "method": "resources/read",
+        "uri": "icm://../../real-user-state",
+        "expectedErrorCode": -32602,
+        "methodNotFoundAccepted": false,
+        "methodNotFoundBaselineClassification": "UNSUPPORTED_BASELINE",
+        "metadataOnEveryRequest": true
+      }
     }
   },
   "semanticCorrections": {

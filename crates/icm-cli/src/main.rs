@@ -2232,6 +2232,9 @@ fn main() -> Result<()> {
             let result = match command {
                 HookCommands::Pre => cmd_hook_pre(),
                 HookCommands::Post { every } => {
+                    if !cfg.extraction.enabled {
+                        return Ok(());
+                    }
                     // CLI flag wins over config; absent flag falls back to config.
                     let extract_every = every.unwrap_or(cfg.extraction.extract_every);
                     #[cfg(feature = "embeddings")]

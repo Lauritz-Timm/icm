@@ -1,4 +1,4 @@
-# Clean-room evaluation design v5 and untouched baseline
+# Clean-room evaluation design v6 and untouched baseline
 
 Date: 2026-08-05  
 Role: independent evaluation designer  
@@ -7,7 +7,7 @@ Product changes: none
 
 ## Outcome
 
-The standalone evaluator under `cleanroom/eval` now implements the audited v5
+The standalone evaluator under `cleanroom/eval` now implements the audited v6
 design. It contains 326 preregistered scenarios and evaluates a real ICM binary
 against evaluator-owned SQLite/JSON fixtures, 29 exact legacy observations,
 closed modern schemas, provider lifecycle contracts, and deterministic
@@ -20,7 +20,7 @@ The corrected authoritative untouched-develop result is:
 | PASS | 71 | Untouched behavior met the preregistered contract |
 | FAIL | 21 | Reproducible upstream protocol or boundary deficiencies |
 | UNSUPPORTED_BASELINE | 234 | Required replacement capability is absent, with concrete wire or CLI evidence |
-| Total | 326 | Complete v5 inventory |
+| Total | 326 | Complete v6 inventory |
 
 `portableAcceptance` is false for untouched `develop`, as expected. Candidate
 mode requires every scenario to pass. Replaying the untouched binary in
@@ -33,20 +33,23 @@ source existed while v5 was corrected, so v5 does not make that blanket claim.
 Version 5 was frozen before any candidate scenario execution, no candidate
 outcomes were observed or used to tune acceptance, and its correction basis was
 limited to official MCP output-schema semantics and independently mergeable
-phase gates. All authoritative evaluator-freeze evidence below evaluates the
-unchanged upstream-develop binary, not the changing Phase 2 product.
+phase gates. Version 6 was derived only from the official final MCP basic/schema
+and v1-v5 preregistration provenance: this audit inspected neither Phase 2
+source nor candidate outcomes and changed neither inventory nor thresholds. All
+authoritative evaluator-freeze evidence below evaluates the unchanged
+upstream-develop binary, not the changing Phase 2 product.
 
 ## Provenance and package health
 
 The evaluated ICM binary has SHA-256
 `8ec3c43899f6f899c230165026945b224ad9926f41ae6d618c6d473ad032e684`.
 The final evaluator binary has SHA-256
-`82c5c0893174b03b8ed9e396c5e3580cb629b718eb0cf25914a3899a71183cd5`.
-The v5 preregistered design has SHA-256
-`103e7e34ef7c475d03d0be34a2c6e1a51d4813008fe3a0a6390a815f56609c63`.
+`41d3e8d9a0d08f62f7b56cb7b803a248e1da1ebbc549b86682801498431b564d`.
+The v6 preregistered design has SHA-256
+`2b7a3dfdc6be85540fa2b4916c91d84f5879a5e48ce23f6be4c7d6bd9525cfba`.
 The evaluator source-tree aggregate, computed from the sorted
 `Cargo.toml`/`Cargo.lock`/`src`/`contracts`/`fixtures`/`goldens` file-hash list,
-is `9aa3f35add0fd37df906752a87d9d4e676133d917278f7fb79a26a925f5a6528`.
+is `e0377cbbc0abbd9aef87a4ff31718b543bd638dcc42ba39bc4f064a6ac46eaa0`.
 Its independent lockfile has SHA-256
 `5c620c2c8f895a15524e8b4589246f72e9af67f59a3157f9c681d51380ac4993`.
 
@@ -55,8 +58,8 @@ The final evaluator passes:
 - `cargo fmt --check`;
 - locked, offline build and tests;
 - locked, offline clippy across all targets with warnings denied;
-- 31 evaluator-owned unit tests;
-- design verification at version 5: 326 scenarios, 31 tools, 11 structured
+- 32 evaluator-owned unit tests;
+- design verification at version 6: 326 scenarios, 31 tools, 11 structured
   tool schemas, 29 deterministic legacy goldens, five fixture files, seven
   contract files, and 30 typed threshold bindings;
 - a real-loopback, two-root self-test under one spaces path and one Unicode
@@ -68,11 +71,29 @@ and JSON fixtures. Product behavior is observed only by launching the separate
 candidate binary. No product source, repository lockfile, branch, commit, or
 remote was changed.
 
-## Frozen v5 contract
+## Frozen v6 contract
 
-Versions 1 through 4 remain immutable in their prior evidence and archives.
-Version 5 corrects two evaluator-integrity defects before candidate execution,
-without changing the 326-scenario inventory or acceptance thresholds:
+Versions 1 through 5 remain immutable in their prior evidence and archives.
+Version 6 closes the final bounded lifecycle/metadata drift found by auditing
+only the official final MCP basic/schema and preregistration provenance:
+
+- ICM's new application-defined era-lock and lifecycle errors are `-31010` and
+  `-31011`, outside the final specification's `-32768..-32000` reserved range;
+  the former `-32010`/`-32011` meanings were introduced in v4 and therefore
+  were not eligible for the legacy-code carve-out;
+- `modern.2026-invalid-meta-key` sends `1bad/foo`, whose prefix label starts
+  with a digit. Bare `invalid` is retained as a positive grammar regression
+  because an unprefixed alphanumeric name is valid;
+- top-level `_meta` is not claimed to be independently forbidden; it simply
+  does not satisfy the required metadata at `params._meta`;
+- one era per stdio process is an explicit ICM compatibility policy, not an
+  MCP-mandated error behavior. MCP permits but does not require concurrent
+  dual-era service; every 2026 request remains stateless and is validated from
+  its own metadata;
+- the scenario inventory and acceptance thresholds remain unchanged.
+
+Version 5's independent-schema and phase-independence corrections remain in
+force:
 
 - each of the 11 advertised output schemas is independently self-contained,
   explicitly declares an object root for MCP 2025 projections, and resolves
@@ -87,14 +108,13 @@ without changing the 326-scenario inventory or acceptance thresholds:
   output schema is present;
 - an evaluator regression runs all ten Phase 2 gates without output schemas and
   separately proves that the dedicated Phase 3 gate rejects their absence;
-
 - exact MCP lifecycle state tests cover calls before initialize, the
   initialize-response gap, initialized-before-initialize, duplicate
   `notifications/initialized`, a second initialize, and a complete 2024
   lifecycle;
-- the 2026-07-28 era is locked to JSON-RPC error `-32010` with its exact
-  message/data contract, while lifecycle misuse is separately locked to
-  `-32011`;
+- the ICM stdio compatibility era is locked to application error `-31010`
+  with its exact message/data contract, while lifecycle misuse is separately
+  locked to application error `-31011`;
 - modern requests use the full reserved metadata keys, exact result typing,
   cache metadata, closed output schemas, and actual-emission validation;
 - resource selection freezes exact topic eligibility, ranking, tie-breaking,
@@ -117,10 +137,10 @@ The frozen contract hashes are:
 
 | Contract | SHA-256 |
 |---|---|
-| `mcp-2026-wire-contract.json` | `266d433ded7fcb0a807c5faae313fa32da4c0d42bdf403fa19544ccba4752582` |
+| `mcp-2026-wire-contract.json` | `81fa75b803be52499befe18e7cb7e4f1ae78d4d2b110d54254a91dace12a60d4` |
 | `modern-output-schemas.json` | `640f018bab821ad1d81e3c10fa6c986eabc460fd763d2dc9a54539a88f0bee9c` |
 | `normalization-rules.json` | `d2f012a84b713fed7a364368c7453df70f0f2dbf53eb313b20f2c1ddb39e8245` |
-| `preregistered-design.json` | `103e7e34ef7c475d03d0be34a2c6e1a51d4813008fe3a0a6390a815f56609c63` |
+| `preregistered-design.json` | `2b7a3dfdc6be85540fa2b4916c91d84f5879a5e48ce23f6be4c7d6bd9525cfba` |
 | `provider-contracts.json` | `e4e51d09f0ac5ec3fe9e9ae02a254c86c6f38f61c3271a77ff7dbe61c2cf7a37` |
 | `proxy-contracts.json` | `77c3ec5e536c9a1dc3538eeb7b3274929e16d4d58a62aa5238dce57d1828840e` |
 | `tool-annotations.json` | `a09b9be52596d9c1c4de061f6a424bda556550122c6557a96c02279688dbf7ff` |
@@ -228,29 +248,29 @@ The authoritative evidence tree contains neither the inherited home path nor
 the `ICM_EVAL_CANARY_V4_` prefix. Every result's embedded raw-exchange hash was
 recomputed against its sibling JSONL file.
 
-## Authoritative v5 evidence
+## Authoritative v6 evidence
 
 The spaces/Unicode two-root reports are byte-identical after only the frozen
 normalization allowlist:
 
-`57a4aeb6c52bd3f483ee376ff5ff1f6625c712a8b0261d87d55df89557f470a1`
+`4de6db44dddaabdd502b1bc2fa0e74e1ff76f575fde16a8f8f4985369656e96c`
 
-Artifacts relative to the v5 evidence root:
+Artifacts relative to the v6 evidence root:
 
 | Artifact | SHA-256 |
 |---|---|
-| `authoritative-untouched-develop-v5-result.json` | `b1da42793c7289c02b27cb6422b9da39d1375e765cffc1157ffe0ab96ff05cbb` |
-| `authoritative-untouched-develop-v5-raw-exchanges.jsonl` | `5a1aa1e7bf59bb03672618a9cc71acec8e743b69de9eda1bc7604ce2cf459d8d` |
-| `authoritative-hermetic-two-root-v5-result.json` | `77b6584e6083b0484df41c74e2a3dec476c4f15ed03e587f86c1f696c7b49b69` |
-| `authoritative-hermetic-two-root-v5-root-1-result.json` | `98402e30c55560973cee16c2ed083ff62229ca3b8210de2f6fe281896137350d` |
-| `authoritative-hermetic-two-root-v5-root-1-raw-exchanges.jsonl` | `cb32aae9fa2bd2dab3d32c1ad2cb3c5e618686675cfcd5141654c8e5b9cd08f3` |
-| `authoritative-hermetic-two-root-v5-root-2-result.json` | `dbc53feafb8a1d42c9c185ec5f760497f549c56b7ab0e091bebaa5a03b7df138` |
-| `authoritative-hermetic-two-root-v5-root-2-raw-exchanges.jsonl` | `a875f2cad3ffc86c7007902624a8f96aa6afffc6b4a480cc04589855b33f8f38` |
-| `authoritative-golden-replay-v5-result.json` | `22aedeb0375bfa19f3ae17cd977316fc89dc230cc3c8a5ff30241fc14276084f` |
-| `authoritative-golden-replay-v5-raw-exchanges.jsonl` | `b3fcefb1c63dfbdd5a7d5ee9c89d60d36c2b9041acb81e70b8b7f7cab753deac` |
+| `authoritative-untouched-develop-v6-result.json` | `3398b3537aec90905ed10c8f03446a6587b31cc805c627d71500e9c95abb898c` |
+| `authoritative-untouched-develop-v6-raw-exchanges.jsonl` | `ff28823fb452fa98125067ddba1711b9f7e28b2874c9a24104bae5c8374cdfec` |
+| `authoritative-hermetic-two-root-v6-result.json` | `7c9a02a6276d318ba36e6065ce44e81231f171de3d163d6f150cabf9f57fbbfb` |
+| `authoritative-hermetic-two-root-v6-root-1-result.json` | `7bbfd41646c63ae0c6932b2dfe23f3f42f0a931f48e402da6a9e00c59fcda6af` |
+| `authoritative-hermetic-two-root-v6-root-1-raw-exchanges.jsonl` | `9e1cc8a3a4ad1284276519537cb66090a52e91df4699420ea1a89ab688f4e22a` |
+| `authoritative-hermetic-two-root-v6-root-2-result.json` | `1f096b6ad2e11cabbae7cb069f5b08cb825bc28ce28783b60a90feff83b40d2d` |
+| `authoritative-hermetic-two-root-v6-root-2-raw-exchanges.jsonl` | `d912b040c50344bc002a7bf75503caad3092cc59c053a8ea8f82ff24479d6919` |
+| `authoritative-golden-replay-v6-result.json` | `9f36e6e809e632ab2fadc7f68ebbe5da1fb993d65be0e68e0676d0dd5ab53b1c` |
+| `authoritative-golden-replay-v6-raw-exchanges.jsonl` | `bac6f37c0379dc80bbe7286891cc201bc5af165af28b8f371cbf54d01b8df858` |
 
 The aggregate over the sorted nine-file evidence hash list is
-`5f586b473e64471f71b063010ba4551a057ff4078373b252ba5f1c38bf78a03c`.
+`8cfa8284cbe897a1c2db58f613b86d511f6d05c17234e666810fced7d9afd63c`.
 
 ## Baseline measurements
 
@@ -260,9 +280,9 @@ samples produced these host observations in microseconds:
 
 | Operation | Median | p95 |
 |---|---:|---:|
-| tools/list | 1,460 | 1,688 |
-| memory/recall | 1,480 | 1,643 |
-| memory/stats | 129 | 142 |
+| tools/list | 1,446 | 1,560 |
+| memory/recall | 1,435 | 1,554 |
+| memory/stats | 102 | 154 |
 
 Retrieval over six committed queries remained perfect: Hit@3 1.0, Recall@3
 1.0, and nDCG@3 1.0. Latency is measured but interpreted with the frozen ratio,

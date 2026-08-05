@@ -7,6 +7,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::fixtures::{load_paths, load_providers};
+use crate::mcp::{
+    meta_key_is_valid, ERA_LOCKED_ERROR_CODE, INVALID_META_KEY_FIXTURE,
+    LIFECYCLE_VIOLATION_ERROR_CODE,
+};
 use crate::sandbox::{join_pure, sha256_bytes, sha256_file, REQUIRED_ENV};
 use crate::schema;
 
@@ -112,8 +116,24 @@ pub fn verify(suite_root: &Path) -> Result<DesignVerification> {
             .get("v5CandidateOutcomesObserved")
             .and_then(Value::as_bool)
             != Some(false)
+        || design
+            .pointer("/v6IntegrityAudit/productSourceInspected")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || design
+            .pointer("/v6IntegrityAudit/candidateOutcomesObserved")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || design
+            .pointer("/v6IntegrityAudit/scenarioInventoryChanged")
+            .and_then(Value::as_bool)
+            != Some(false)
+        || design
+            .pointer("/v6IntegrityAudit/acceptanceThresholdsChanged")
+            .and_then(Value::as_bool)
+            != Some(false)
     {
-        anyhow::bail!("design freeze provenance differs from the frozen v5 record");
+        anyhow::bail!("design freeze provenance differs from the frozen v6 record");
     }
     if design.get("v5CorrectionBasis")
         != Some(&serde_json::json!([
@@ -125,17 +145,26 @@ pub fn verify(suite_root: &Path) -> Result<DesignVerification> {
     }
     if design.get("candidateContext").and_then(Value::as_str)
         != Some(
-            "Phase 2 replacement source existed during v5 correction; no candidate scenario outcomes were observed or used to tune acceptance",
+            "Phase 2 replacement source existed; v6 was derived only from the official final MCP basic/schema and v1-v5 preregistration provenance, without inspecting Phase 2 source or candidate outcomes",
         )
     {
-        anyhow::bail!("v5 candidate context differs from the frozen provenance record");
+        anyhow::bail!("v6 candidate context differs from the frozen provenance record");
+    }
+    if design.pointer("/v6IntegrityAudit/correctionBasis")
+        != Some(&serde_json::json!([
+            "official final MCP 2026-07-28 error-code allocation",
+            "official final MCP 2026-07-28 _meta key grammar",
+            "official final MCP 2026-07-28 dual-era compatibility semantics"
+        ]))
+    {
+        anyhow::bail!("v6 correction basis differs from the bounded official-spec audit");
     }
     let design_version = design
         .get("designVersion")
         .and_then(Value::as_u64)
         .context("missing designVersion")?;
-    if design_version != 5 {
-        anyhow::bail!("expected authoritative preregistration designVersion 5");
+    if design_version != 6 {
+        anyhow::bail!("expected authoritative preregistration designVersion 6");
     }
 
     verify_environment(&design)?;
@@ -445,7 +474,16 @@ fn verify_contracts(suite_root: &Path, design: &Value) -> Result<BTreeMap<String
     }
 
     let wire: Value = read_json(&suite_root.join("contracts/mcp-2026-wire-contract.json"))?;
-    if wire.get("accessedAt").and_then(Value::as_str) != Some("2026-08-05")
+    let era_locked_code = wire
+        .pointer("/errors/eraLocked/code")
+        .and_then(Value::as_i64)
+        .context("era-locked application error code missing")?;
+    let lifecycle_code = wire
+        .pointer("/errors/lifecycleViolation/code")
+        .and_then(Value::as_i64)
+        .context("lifecycle application error code missing")?;
+    if wire.get("contractVersion").and_then(Value::as_u64) != Some(2)
+        || wire.get("accessedAt").and_then(Value::as_str) != Some("2026-08-05")
         || wire.get("runtimeNetworkRequired").and_then(Value::as_bool) != Some(false)
         || wire
             .pointer("/request/metadataLocation")
@@ -455,6 +493,30 @@ fn verify_contracts(suite_root: &Path, design: &Value) -> Result<BTreeMap<String
             .pointer("/request/discoveryMethod")
             .and_then(Value::as_str)
             != Some("server/discover")
+        || wire
+            .pointer("/request/topLevelMetadataDoesNotSatisfyRequiredMetadata")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || wire
+            .pointer("/request/invalidMetadataKeyFixture")
+            .and_then(Value::as_str)
+            != Some(INVALID_META_KEY_FIXTURE)
+        || wire
+            .pointer("/request/validBareMetadataKeyExample")
+            .and_then(Value::as_str)
+            != Some("invalid")
+        || era_locked_code != ERA_LOCKED_ERROR_CODE
+        || lifecycle_code != LIFECYCLE_VIOLATION_ERROR_CODE
+        || (-32768..=-32000).contains(&era_locked_code)
+        || (-32768..=-32000).contains(&lifecycle_code)
+        || wire
+            .pointer("/connectionEra/modernRequestsStateless")
+            .and_then(Value::as_bool)
+            != Some(true)
+        || wire
+            .pointer("/connectionEra/concurrentDualEraServiceRequiredByMcp")
+            .and_then(Value::as_bool)
+            != Some(false)
         || wire.pointer("/resource/uri").and_then(Value::as_str)
             != Some("icm://active-project/context")
         || wire
@@ -470,7 +532,13 @@ fn verify_contracts(suite_root: &Path, design: &Value) -> Result<BTreeMap<String
             .and_then(Value::as_u64)
             != Some(2048)
     {
-        anyhow::bail!("offline MCP wire contract differs from the frozen v5 semantics");
+        anyhow::bail!("offline MCP wire contract differs from the frozen v6 semantics");
+    }
+    if !meta_key_is_valid("invalid")
+        || !meta_key_is_valid("com.example/evaluation")
+        || meta_key_is_valid(INVALID_META_KEY_FIXTURE)
+    {
+        anyhow::bail!("frozen metadata-key fixtures differ from the final MCP grammar");
     }
     let design_urls: BTreeSet<_> = design
         .pointer("/officialSources/urls")
@@ -516,7 +584,7 @@ fn verify_contracts(suite_root: &Path, design: &Value) -> Result<BTreeMap<String
             .and_then(Value::as_bool)
             != Some(false)
     {
-        anyhow::bail!("proxy contract differs from the frozen v5 black-box contract");
+        anyhow::bail!("proxy contract differs from the frozen v6 black-box contract");
     }
     let normalization: Value = read_json(&suite_root.join("contracts/normalization-rules.json"))?;
     crate::normalization::verify_contract(&suite_root.join("contracts/normalization-rules.json"))?;

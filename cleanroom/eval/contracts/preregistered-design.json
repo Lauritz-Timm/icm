@@ -1,5 +1,5 @@
 {
-  "designVersion": 5,
+  "designVersion": 6,
   "designRevisions": [
     {"version": 1, "state": "initial preregistration before first untouched-baseline execution"},
     {"version": 2, "state": "pre-replacement harness correction after untouched-baseline dry run"},
@@ -29,6 +29,17 @@
         "design verification and the dedicated output-schema gate reject any schema without an explicit object root or any local $ref that does not resolve within that individual schema",
         "Phase 2 tools/list and annotation gates do not require Phase 3 outputSchema; the closed-schema gate checks output closure only when outputSchema is present"
       ]
+    },
+    {
+      "version": 6,
+      "state": "official-final-spec-only bounded protocol integrity correction without Phase 2 product or candidate inspection",
+      "changes": [
+        "new ICM application-defined era-lock and lifecycle errors move from legacy MCP codes -32010/-32011 to -31010/-31011 outside the JSON-RPC reserved range",
+        "modern.2026-invalid-meta-key now sends 1bad/foo because bare invalid is a syntactically valid unprefixed _meta name",
+        "top-level _meta is frozen only as not satisfying required params._meta, without claiming every extra top-level member is independently forbidden",
+        "same-process era-switch rejection remains an explicit ICM stdio compatibility policy rather than an MCP-mandated error behavior; 2026 requests remain stateless",
+        "scenario inventory and acceptance thresholds are unchanged"
+      ]
     }
   ],
   "initialDesignFrozenBeforeReplacementCode": true,
@@ -39,14 +50,28 @@
     "official MCP outputSchema semantics",
     "independently mergeable phase gates"
   ],
-  "candidateContext": "Phase 2 replacement source existed during v5 correction; no candidate scenario outcomes were observed or used to tune acceptance",
+  "v6IntegrityAudit": {
+    "productSourceInspected": false,
+    "candidateOutcomesObserved": false,
+    "scenarioInventoryChanged": false,
+    "acceptanceThresholdsChanged": false,
+    "correctionBasis": [
+      "official final MCP 2026-07-28 error-code allocation",
+      "official final MCP 2026-07-28 _meta key grammar",
+      "official final MCP 2026-07-28 dual-era compatibility semantics"
+    ]
+  },
+  "candidateContext": "Phase 2 replacement source existed; v6 was derived only from the official final MCP basic/schema and v1-v5 preregistration provenance, without inspecting Phase 2 source or candidate outcomes",
   "scenarioCount": 326,
   "supersession": {
-    "authoritativeDesign": 5,
+    "authoritativeDesign": 6,
+    "v5AuthoritativeForReplacementAcceptance": false,
+    "v5Retention": "immutable historical audit evidence",
     "v4AuthoritativeForReplacementAcceptance": false,
     "v4Retention": "immutable historical audit evidence",
     "v3AuthoritativeForReplacementAcceptance": false,
     "v3Retention": "immutable historical audit evidence",
+    "v5Reason": "v5 newly allocated -32010/-32011 in the final specification legacy sub-range and treated syntactically valid bare _meta key invalid as malformed",
     "v4Reason": "five expected and advertised outputSchema objects contained local fragment refs whose $defs existed only in the evaluator wrapper, which MCP clients never receive",
     "v3Reason": "v3 placed shortened metadata at the JSON-RPC top level and called discover, conflicting with the official 2026-07-28 request schema and method name"
   },
@@ -67,6 +92,21 @@
     "evidenceAggregateSha256": "8152b9e9ce84c146d510980172c2c583524b46272dacca18fd96440830f2a18c",
     "archiveManifestSha256": "40fe855e5022cd09ab592199e845231a2b96bc5333daf68cc2db44c7953d1b69"
   },
+  "v5FrozenAudit": {
+    "mcpSourceSha256": "264f1e5dd2cb3b1ead1afe31822ec1979b5cd81fe0d951f8fa86aee1893baf25",
+    "evaluateSourceSha256": "e6eadac1dd8dc0bdad6430f68788cdd5b4b5daab22e6263a04b66520a892f66f",
+    "designSourceSha256": "fc860d7720eb303b512157cc8f65cda48da25248ff688f8597c9bdd3349139da",
+    "schemaSourceSha256": "94650877e0fd26b547c5df095a0f02506bfe9b3e5f3c4649fc764c84b95a8f4b",
+    "fixturesSourceSha256": "24db4aac94ea841a89f6b78132655024e54aefaf323a537057a8a23d153782c3",
+    "wireContractSha256": "266d433ded7fcb0a807c5faae313fa32da4c0d42bdf403fa19544ccba4752582",
+    "modernSchemasSha256": "640f018bab821ad1d81e3c10fa6c986eabc460fd763d2dc9a54539a88f0bee9c",
+    "designSha256": "103e7e34ef7c475d03d0be34a2c6e1a51d4813008fe3a0a6390a815f56609c63",
+    "evaluatorBinarySha256": "82c5c0893174b03b8ed9e396c5e3580cb629b718eb0cf25914a3899a71183cd5",
+    "sourceTreeAggregateSha256": "9aa3f35add0fd37df906752a87d9d4e676133d917278f7fb79a26a925f5a6528",
+    "reportSha256": "3dd10def385a0e1be8975d2278ed19bc5f7e7858263161a3cb77ba955e11a3c1",
+    "evidenceAggregateSha256": "5f586b473e64471f71b063010ba4551a057ff4078373b252ba5f1c38bf78a03c",
+    "archiveManifestSha256": "6d15d6bb8e832c86c30bac2383202737e775ff99389e1a9941b7883ee610d239"
+  },
   "officialSources": {
     "accessedAt": "2026-08-05",
     "runtimeNetworkRequired": false,
@@ -83,9 +123,12 @@
     "initializedModern": ["2025-06-18", "2025-11-25"],
     "perRequestModern": ["2026-07-28"],
     "supportedNewestFirst": ["2026-07-28", "2025-11-25", "2025-06-18", "2024-11-05"],
-    "connectionEraPolicy": "separate connections may choose either era; a connection is locked by its successful opener and cannot switch",
+    "connectionEraPolicy": "ICM stdio compatibility policy chooses one era per process from its successful opener; MCP permits but does not require concurrent dual-era service",
+    "connectionEraPolicyAuthority": "ICM compatibility policy, not MCP-mandated error behavior",
+    "concurrentDualEraServiceRequiredByMcp": false,
+    "modernRequestsStateless": true,
     "eraLockedError": {
-      "code": -32010,
+      "code": -31010,
       "message": "protocol era is locked for this connection; open a new connection",
       "data": ["kind", "selectedEra", "requestedEra"]
     }
@@ -207,7 +250,7 @@
   "interfaces": {
     "contextResourceUri": "icm://active-project/context",
     "initializedLifecycleRequired": true,
-    "lifecycleViolation": {"code": -32011, "message": "protocol lifecycle violation; open a new connection"},
+    "lifecycleViolation": {"code": -31011, "message": "protocol lifecycle violation; open a new connection"},
     "providerCommands": [
       "provider trust --provider <id> --scope <project-local|user> --yes",
       "provider strip --provider <id> --scope <project-local|user> --yes",

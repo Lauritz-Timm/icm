@@ -20,6 +20,7 @@ use crate::fixtures::{
 };
 use crate::mcp::{
     error_code, modern_request, result, text_content, tool_call, tools_list, Exchange, McpClient,
+    ERA_LOCKED_ERROR_CODE, INVALID_META_KEY_FIXTURE, LIFECYCLE_VIOLATION_ERROR_CODE,
     META_CLIENT_CAPABILITIES, META_CLIENT_INFO, META_PROTOCOL_VERSION, META_SERVER_INFO,
 };
 use crate::metrics::{
@@ -894,7 +895,7 @@ impl Runner {
                     }
                     "modern.2026-invalid-meta-key" => {
                         let mut request = modern_request(1, "server/discover", json!({}), true);
-                        request["params"]["_meta"]["invalid"] = json!({});
+                        request["params"]["_meta"][INVALID_META_KEY_FIXTURE] = json!({});
                         client.request(request)?
                     }
                     "modern.tools-list-order"
@@ -3787,7 +3788,7 @@ fn validate_modern(suite_root: &Path, design: &Value, id: &str, response: &Value
         }
         "modern.reject-switch-to-2026-after-initialize"
         | "modern.reject-switch-to-initialize-after-discover" => {
-            if error_code(response) != Some(-32010) {
+            if error_code(response) != Some(ERA_LOCKED_ERROR_CODE) {
                 return Ok(
                     json!({"supported":false,"response":response,"reason":"frozen-era-lock-error-absent"}),
                 );
@@ -3972,7 +3973,7 @@ fn validate_protocol_lifecycle(id: &str, response: &Value) -> Result<Value> {
         other => anyhow::bail!("unknown protocol lifecycle scenario {other}"),
     };
     if response.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
-        || error_code(response) != Some(-32011)
+        || error_code(response) != Some(LIFECYCLE_VIOLATION_ERROR_CODE)
         || response.pointer("/error/message").and_then(Value::as_str)
             != Some("protocol lifecycle violation; open a new connection")
         || response.pointer("/error/data")

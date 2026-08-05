@@ -17,6 +17,9 @@ pub const META_PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion
 pub const META_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
 pub const META_CLIENT_INFO: &str = "io.modelcontextprotocol/clientInfo";
 pub const META_SERVER_INFO: &str = "io.modelcontextprotocol/serverInfo";
+pub const ERA_LOCKED_ERROR_CODE: i64 = -31010;
+pub const LIFECYCLE_VIOLATION_ERROR_CODE: i64 = -31011;
+pub const INVALID_META_KEY_FIXTURE: &str = "1bad/foo";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -288,6 +291,41 @@ pub fn error_code(value: &Value) -> Option<i64> {
     value.pointer("/error/code").and_then(Value::as_i64)
 }
 
+pub fn meta_key_is_valid(key: &str) -> bool {
+    let name = if let Some((prefix, name)) = key.split_once('/') {
+        if prefix.is_empty()
+            || name.contains('/')
+            || !prefix.split('.').all(|label| {
+                let mut characters = label.chars();
+                let Some(first) = characters.next() else {
+                    return false;
+                };
+                let last = label.chars().next_back().unwrap_or(first);
+                first.is_ascii_alphabetic()
+                    && last.is_ascii_alphanumeric()
+                    && label
+                        .chars()
+                        .all(|character| character.is_ascii_alphanumeric() || character == '-')
+            })
+        {
+            return false;
+        }
+        name
+    } else {
+        key
+    };
+    if name.is_empty() {
+        return true;
+    }
+    let first = name.chars().next().unwrap_or_default();
+    let last = name.chars().next_back().unwrap_or_default();
+    first.is_ascii_alphanumeric()
+        && last.is_ascii_alphanumeric()
+        && name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
+        })
+}
+
 pub fn text_content(value: &Value) -> Result<String> {
     let content = result(value)?
         .get("content")
@@ -375,5 +413,13 @@ mod tests {
             )),
             Some(&json!({}))
         );
+    }
+
+    #[test]
+    fn final_meta_key_grammar_distinguishes_bare_names_from_invalid_prefixes() {
+        assert!(meta_key_is_valid("invalid"));
+        assert!(meta_key_is_valid("com.example/evaluation"));
+        assert!(!meta_key_is_valid(INVALID_META_KEY_FIXTURE));
+        assert!(!meta_key_is_valid("bad-/foo"));
     }
 }

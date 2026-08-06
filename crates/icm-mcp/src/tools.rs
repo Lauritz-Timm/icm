@@ -1111,7 +1111,11 @@ fn tool_transcript_start_session(store: &Store, args: &Value) -> ToolResult {
     let project = args.get("project").and_then(|v| v.as_str());
     let metadata = args.get("metadata").and_then(|v| v.as_str());
     match store.create_session(agent, project, metadata) {
-        Ok(id) => ToolResult::text(format!("{{\"session_id\":\"{id}\"}}")),
+        Ok(id) => {
+            let legacy = format!("{{\"session_id\":\"{id}\"}}");
+            let output = TranscriptStartOutput::new(id);
+            ToolResult::structured(legacy, "Transcript session started.".into(), &output)
+        }
         Err(e) => ToolResult::error(format!("start_session failed: {e}")),
     }
 }
@@ -1142,7 +1146,11 @@ fn tool_transcript_record(store: &Store, args: &Value) -> ToolResult {
     let tokens = args.get("tokens").and_then(|v| v.as_i64());
     let metadata = args.get("metadata").and_then(|v| v.as_str());
     match store.record_message(session_id, role, content, tool_name, tokens, metadata) {
-        Ok(id) => ToolResult::text(format!("{{\"message_id\":\"{id}\"}}")),
+        Ok(id) => {
+            let legacy = format!("{{\"message_id\":\"{id}\"}}");
+            let output = TranscriptRecordOutput::new(id);
+            ToolResult::structured(legacy, "Transcript message recorded.".into(), &output)
+        }
         Err(e) => ToolResult::error(format!("record failed: {e}")),
     }
 }
@@ -1163,7 +1171,12 @@ fn tool_transcript_search(store: &Store, args: &Value) -> ToolResult {
     match store.search_transcripts(query, session_id, project, limit) {
         Ok(hits) => {
             let json = serde_json::to_string(&hits).unwrap_or_else(|_| "[]".into());
-            ToolResult::text(json)
+            let output = TranscriptSearchOutput::new(&hits);
+            ToolResult::structured(
+                json,
+                format!("Found {} transcript messages.", output.len()),
+                &output,
+            )
         }
         Err(e) => ToolResult::error(format!("search failed: {e}")),
     }
@@ -1189,14 +1202,23 @@ fn tool_transcript_show(store: &Store, args: &Value) -> ToolResult {
         Ok(m) => m,
         Err(e) => return ToolResult::error(format!("list_messages failed: {e}")),
     };
+    let output = TranscriptShowOutput::new(&sess, &msgs);
     let body = json!({ "session": sess, "messages": msgs });
-    ToolResult::text(body.to_string())
+    ToolResult::structured(
+        body.to_string(),
+        format!("Returned a transcript with {} messages.", output.len()),
+        &output,
+    )
 }
 
 fn tool_transcript_stats(store: &Store) -> ToolResult {
     use icm_core::TranscriptStore;
     match store.transcript_stats() {
-        Ok(s) => ToolResult::text(serde_json::to_string(&s).unwrap_or_else(|_| "{}".into())),
+        Ok(stats) => {
+            let legacy = serde_json::to_string(&stats).unwrap_or_else(|_| "{}".into());
+            let output = TranscriptStatsOutput::from(stats);
+            ToolResult::structured(legacy, "Returned transcript statistics.".into(), &output)
+        }
         Err(e) => ToolResult::error(format!("stats failed: {e}")),
     }
 }
@@ -2818,13 +2840,15 @@ fn tool_feedback_record(
     }
 
     let id = feedback.id.clone();
+    let structured = FeedbackOutput::from(&feedback);
     match store.store_feedback(feedback) {
         Ok(_) => {
-            if compact {
-                ToolResult::text(format!("ok {id}"))
+            let legacy = if compact {
+                format!("ok {id}")
             } else {
-                ToolResult::text(format!("Feedback recorded: {id}\n  topic: {topic}\n  predicted: {predicted}\n  corrected: {corrected}"))
-            }
+                format!("Feedback recorded: {id}\n  topic: {topic}\n  predicted: {predicted}\n  corrected: {corrected}")
+            };
+            ToolResult::structured(legacy, "Feedback recorded.".into(), &structured)
         }
         Err(e) => ToolResult::error(format!("failed to store feedback: {e}")),
     }
@@ -2845,8 +2869,13 @@ fn tool_feedback_search(
 
     match store.search_feedback(query, query_embedding.as_deref(), topic, limit) {
         Ok(results) => {
+            let structured = FeedbackSearchOutput::new(&results);
             if results.is_empty() {
-                return ToolResult::text("No feedback found.".into());
+                return ToolResult::structured(
+                    "No feedback found.".into(),
+                    "Found 0 feedback entries.".into(),
+                    &structured,
+                );
             }
             // context/predicted/corrected/reason/source can originate from
             // untrusted content (a feedback entry recorded from tool output
@@ -2875,7 +2904,11 @@ fn tool_feedback_search(
                     output.push_str(&format!("  applied: {} times\n", fb.applied_count));
                 }
             }
-            ToolResult::text(output)
+            ToolResult::structured(
+                output,
+                format!("Found {} feedback entries.", structured.len()),
+                &structured,
+            )
         }
         Err(e) => ToolResult::error(format!("failed to search feedback: {e}")),
     }
@@ -2884,6 +2917,7 @@ fn tool_feedback_search(
 fn tool_feedback_stats(store: &Store) -> ToolResult {
     match store.feedback_stats() {
         Ok(stats) => {
+            let structured = FeedbackStatsOutput::from(stats.clone());
             let mut output = format!("Feedback total: {}\n", stats.total);
             if !stats.by_topic.is_empty() {
                 output.push_str("\nBy topic:\n");
@@ -2897,7 +2931,7 @@ fn tool_feedback_stats(store: &Store) -> ToolResult {
                     output.push_str(&format!("  {id}: {count} times\n"));
                 }
             }
-            ToolResult::text(output)
+            ToolResult::structured(output, "Returned feedback statistics.".into(), &structured)
         }
         Err(e) => ToolResult::error(format!("failed to get feedback stats: {e}")),
     }

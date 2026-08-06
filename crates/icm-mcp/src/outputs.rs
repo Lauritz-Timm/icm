@@ -309,3 +309,313 @@ mod tests {
         );
     }
 }
+
+use icm_core::{Feedback, FeedbackStats, Message, Role, Session, TranscriptHit, TranscriptStats};
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct TranscriptStartOutput {
+    #[schemars(length(min = 1))]
+    session_id: String,
+}
+
+impl TranscriptStartOutput {
+    pub(crate) fn new(session_id: String) -> Self {
+        Self { session_id }
+    }
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct TranscriptRecordOutput {
+    #[schemars(length(min = 1))]
+    message_id: String,
+}
+
+impl TranscriptRecordOutput {
+    pub(crate) fn new(message_id: String) -> Self {
+        Self { message_id }
+    }
+}
+
+#[derive(Clone, Copy, Debug, JsonSchema, Serialize)]
+#[schemars(inline)]
+#[serde(rename_all = "lowercase")]
+enum TranscriptRoleOutput {
+    User,
+    Assistant,
+    System,
+    Tool,
+}
+
+impl From<Role> for TranscriptRoleOutput {
+    fn from(value: Role) -> Self {
+        match value {
+            Role::User => Self::User,
+            Role::Assistant => Self::Assistant,
+            Role::System => Self::System,
+            Role::Tool => Self::Tool,
+        }
+    }
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[schemars(rename = "message")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TranscriptMessageOutput {
+    id: String,
+    session_id: String,
+    role: TranscriptRoleOutput,
+    content: String,
+    tool_name: Nullable<String>,
+    tokens: Nullable<i64>,
+    timestamp: DateTime<Utc>,
+    metadata: String,
+}
+
+impl From<&Message> for TranscriptMessageOutput {
+    fn from(value: &Message) -> Self {
+        Self {
+            id: value.id.clone(),
+            session_id: value.session_id.clone(),
+            role: value.role.into(),
+            content: value.content.clone(),
+            tool_name: Nullable(value.tool_name.clone()),
+            tokens: Nullable(value.tokens),
+            timestamp: value.ts,
+            metadata: value.metadata.clone(),
+        }
+    }
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[schemars(rename = "session")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TranscriptSessionOutput {
+    id: String,
+    agent: String,
+    project: Nullable<String>,
+    started_at: DateTime<Utc>,
+    updated_at: DateTime<Utc>,
+    metadata: String,
+}
+
+impl From<&Session> for TranscriptSessionOutput {
+    fn from(value: &Session) -> Self {
+        Self {
+            id: value.id.clone(),
+            agent: value.agent.clone(),
+            project: Nullable(value.project.clone()),
+            started_at: value.started_at,
+            updated_at: value.updated_at,
+            metadata: value.metadata.clone(),
+        }
+    }
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[schemars(inline)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TranscriptHitOutput {
+    message: TranscriptMessageOutput,
+    session: TranscriptSessionOutput,
+    score: f64,
+}
+
+impl From<&TranscriptHit> for TranscriptHitOutput {
+    fn from(value: &TranscriptHit) -> Self {
+        Self {
+            message: (&value.message).into(),
+            session: (&value.session).into(),
+            score: value.score,
+        }
+    }
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct TranscriptSearchOutput {
+    hits: Vec<TranscriptHitOutput>,
+}
+
+impl TranscriptSearchOutput {
+    pub(crate) fn new(hits: &[TranscriptHit]) -> Self {
+        Self {
+            hits: hits.iter().map(Into::into).collect(),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.hits.len()
+    }
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct TranscriptShowOutput {
+    session: TranscriptSessionOutput,
+    messages: Vec<TranscriptMessageOutput>,
+}
+
+impl TranscriptShowOutput {
+    pub(crate) fn new(session: &Session, messages: &[Message]) -> Self {
+        Self {
+            session: session.into(),
+            messages: messages.iter().map(Into::into).collect(),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.messages.len()
+    }
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[schemars(inline)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RoleCountOutput {
+    role: String,
+    count: usize,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[schemars(inline)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AgentCountOutput {
+    agent: String,
+    count: usize,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[schemars(inline)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct SessionCountOutput {
+    session_id: String,
+    message_count: usize,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct TranscriptStatsOutput {
+    total_sessions: usize,
+    total_messages: usize,
+    total_bytes: u64,
+    by_role: Vec<RoleCountOutput>,
+    by_agent: Vec<AgentCountOutput>,
+    top_sessions: Vec<SessionCountOutput>,
+    oldest: Nullable<DateTime<Utc>>,
+    newest: Nullable<DateTime<Utc>>,
+}
+
+impl From<TranscriptStats> for TranscriptStatsOutput {
+    fn from(value: TranscriptStats) -> Self {
+        Self {
+            total_sessions: value.total_sessions,
+            total_messages: value.total_messages,
+            total_bytes: value.total_bytes,
+            by_role: value
+                .by_role
+                .into_iter()
+                .map(|(role, count)| RoleCountOutput { role, count })
+                .collect(),
+            by_agent: value
+                .by_agent
+                .into_iter()
+                .map(|(agent, count)| AgentCountOutput { agent, count })
+                .collect(),
+            top_sessions: value
+                .top_sessions
+                .into_iter()
+                .map(|(session_id, message_count)| SessionCountOutput {
+                    session_id,
+                    message_count,
+                })
+                .collect(),
+            oldest: Nullable(value.oldest),
+            newest: Nullable(value.newest),
+        }
+    }
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[schemars(rename = "feedback")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct FeedbackOutput {
+    id: String,
+    topic: String,
+    context: String,
+    predicted: String,
+    corrected: String,
+    reason: Nullable<String>,
+    source: String,
+    created_at: DateTime<Utc>,
+    applied_count: u32,
+}
+
+impl From<&Feedback> for FeedbackOutput {
+    fn from(value: &Feedback) -> Self {
+        Self {
+            id: value.id.clone(),
+            topic: value.topic.clone(),
+            context: value.context.clone(),
+            predicted: value.predicted.clone(),
+            corrected: value.corrected.clone(),
+            reason: Nullable(value.reason.clone()),
+            source: value.source.clone(),
+            created_at: value.created_at,
+            applied_count: value.applied_count,
+        }
+    }
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct FeedbackSearchOutput {
+    feedback: Vec<FeedbackOutput>,
+}
+
+impl FeedbackSearchOutput {
+    pub(crate) fn new(feedback: &[Feedback]) -> Self {
+        Self {
+            feedback: feedback.iter().map(Into::into).collect(),
+        }
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.feedback.len()
+    }
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[schemars(inline)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct AppliedCountOutput {
+    feedback_id: String,
+    count: u32,
+}
+
+#[derive(Debug, JsonSchema, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct FeedbackStatsOutput {
+    total: usize,
+    by_topic: Vec<TopicCountOutput>,
+    most_applied: Vec<AppliedCountOutput>,
+}
+
+impl From<FeedbackStats> for FeedbackStatsOutput {
+    fn from(value: FeedbackStats) -> Self {
+        Self {
+            total: value.total,
+            by_topic: value
+                .by_topic
+                .into_iter()
+                .map(|(topic, count)| TopicCountOutput { topic, count })
+                .collect(),
+            most_applied: value
+                .most_applied
+                .into_iter()
+                .map(|(feedback_id, count)| AppliedCountOutput { feedback_id, count })
+                .collect(),
+        }
+    }
+}

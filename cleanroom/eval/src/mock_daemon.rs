@@ -81,10 +81,12 @@ pub fn run(record_path: &Path, mode: &str, ipv6: bool) -> Result<()> {
         let response = mock_mcp_response(&request.body, mode);
         let response_json = serde_json::to_string(&response)?;
         match mode {
-            "redirect" => write_raw(
-                &mut stream,
-                b"HTTP/1.1 302 Found\r\nLocation: http://192.0.2.1/forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-            )?,
+            "redirect" => {
+                let response = format!(
+                    "HTTP/1.1 302 Found\r\nLocation: http://{address}/forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                );
+                write_raw(&mut stream, response.as_bytes())?;
+            }
             "bad-content-type" => {
                 write_json_response(&mut stream, 200, "text/plain", &response_json)?
             }

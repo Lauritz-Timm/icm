@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::io::{BufRead, BufReader, Read, Write};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream};
+use std::io::{self, BufRead, BufReader, Write};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Output, Stdio};
 use std::sync::mpsc;
@@ -14,25 +14,30 @@ use serde_json::{json, Value};
 
 use crate::design::{self, DesignVerification};
 use crate::fixtures::{
-    augment_boundary_limit_database, augment_resource_database, build_database,
-    commit_resource_snapshot_writer, load_paths, load_providers, load_quality, memory_access_count,
-    FixtureState, ProviderCase, ProviderDocumentFixture, ProviderFixture, ProviderScopeFixture,
+    augment_boundary_limit_database, augment_resource_database, build_database, load_providers,
+    load_quality, memory_access_count, FixtureState, ProviderCase, ProviderDocumentFixture,
+    ProviderFixture, ProviderScopeFixture,
 };
 use crate::mcp::{
-    error_code, modern_request, result, text_content, tool_call, tools_list, Exchange, McpClient,
-    ERA_LOCKED_ERROR_CODE, INVALID_META_KEY_FIXTURE, LIFECYCLE_VIOLATION_ERROR_CODE,
-    META_CLIENT_CAPABILITIES, META_CLIENT_INFO, META_PROTOCOL_VERSION, META_SERVER_INFO,
+    error_code, modern_request, read_bounded_to_end, read_capped_line, result, text_content,
+    tool_call, tools_list, Exchange, McpClient, ERA_LOCKED_ERROR_CODE, INVALID_META_KEY_FIXTURE,
+    LIFECYCLE_VIOLATION_ERROR_CODE, MAX_CAPTURE_BYTES, META_CLIENT_CAPABILITIES, META_CLIENT_INFO,
+    META_PROTOCOL_VERSION, META_SERVER_INFO,
 };
 use crate::metrics::{
     extract_ranked_fixture_ids, retrieval_metrics, size_metrics, summarize_blocks, LatencySummary,
     RetrievalMetrics, SizeMetrics,
 };
 use crate::sandbox::{
-    canary_checkpoint, join_pure, materialize_resolved, resolve_existing, resolve_intent,
+    canary_checkpoint, materialize_resolved, resolve_existing, resolve_intent,
     scan_for_real_path_leaks, sha256_bytes, sha256_file, validate_runner_roots,
     verify_canaries_since, ScenarioSandbox, UserStatePaths,
 };
 use crate::schema;
+
+const LATENCY_WARMUPS_PER_OPERATION: usize = 5;
+const LATENCY_BLOCK_COUNT: usize = 5;
+const LATENCY_SAMPLES_PER_BLOCK: usize = 20;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
@@ -78,7 +83,6 @@ pub struct EvaluationReport {
 pub struct MetricReport {
     pub payload_sizes: BTreeMap<String, SizeMetrics>,
     pub latency: BTreeMap<String, LatencySummary>,
-    pub latency_interpretation: BTreeMap<String, String>,
     pub retrieval: Option<RetrievalMetrics>,
     pub supplemental_pss_kib: BTreeMap<String, u64>,
 }
@@ -148,6 +152,7 @@ impl Runner {
         validate_runner_roots(
             &workspace_root,
             &suite_root,
+            &candidate,
             &work_root,
             &evidence_root,
             &user_state,
@@ -267,8 +272,6 @@ impl Runner {
             self.run_modern(id)
         } else if id.starts_with("resource.") {
             self.run_resource(id)
-        } else if id.starts_with("provider.engine.") {
-            self.run_provider_engine(id)
         } else if id.starts_with("provider.") {
             self.run_provider(id)
         } else if id.starts_with("proxy.") {
@@ -283,13 +286,8 @@ impl Runner {
     }
 
     fn run_isolation(&mut self, id: &str) -> Result<ScenarioResult> {
-        let special_work_root = match id {
-            "iso.spaces-path" => self.work_root.join("root with spaces"),
-            "iso.unicode-path" => self.work_root.join("røød-東京-🧪"),
-            _ => self.work_root.clone(),
-        };
-        fs::create_dir_all(&special_work_root)?;
-        let sandbox = ScenarioSandbox::create(&special_work_root, &self.run_label, id, false)?;
+        fs::create_dir_all(&self.work_root)?;
+        let sandbox = ScenarioSandbox::create(&self.work_root, &self.run_label, id, false)?;
         let detail = match id {
             "iso.fixture-hashes" => json!({"fixtureHashes": self.verification.fixture_hashes}),
             "iso.env-allowlist" => json!({
@@ -368,49 +366,6 @@ impl Runner {
                     "pid": pid
                 })
             }
-            "iso.posix-path" | "iso.windows-path" => {
-                let style = id.trim_start_matches("iso.").trim_end_matches("-path");
-                let paths = load_paths(&self.suite_root)?;
-                let checked = paths
-                    .pure_path_cases
-                    .iter()
-                    .filter(|case| case.style == style)
-                    .map(|case| {
-                        Ok(join_pure(&case.style, &case.base, &case.relative)? == case.expected)
-                    })
-                    .collect::<Result<Vec<_>>>()?;
-                if checked.is_empty() || checked.iter().any(|ok| !ok) {
-                    anyhow::bail!("pure {style} path cases did not match");
-                }
-                json!({"style": style, "caseCount": checked.len()})
-            }
-            "iso.spaces-path" | "iso.unicode-path" => {
-                if id == "iso.spaces-path" && !sandbox.root.to_string_lossy().contains(' ') {
-                    anyhow::bail!("space path scenario root has no space");
-                }
-                if id == "iso.unicode-path" && sandbox.root.to_string_lossy().is_ascii() {
-                    anyhow::bail!("Unicode path scenario root is ASCII-only");
-                }
-                let state = build_database(&self.suite_root, &sandbox.db, true)?;
-                let mut client =
-                    McpClient::spawn(&self.candidate, &sandbox, false, &self.user_state)?;
-                client.initialize_legacy()?;
-                let response = client.request(tool_call(
-                    2,
-                    "icm_memory_recall",
-                    json!({"query":"Unicode café 東京", "project":"", "limit":3}),
-                ))?;
-                let text = text_content(&response)?;
-                let capture = client.shutdown()?;
-                self.record_raw(id, &capture.exchanges, &capture.stdout, &capture.stderr)?;
-                self.verify_capture(
-                    &sandbox,
-                    &capture.exchanges,
-                    &capture.stdout,
-                    &capture.stderr,
-                )?;
-                json!({"fixtureProject": state.project_name, "responseContainsUnicode": text.contains("東京")})
-            }
             "iso.two-root-equality" => {
                 let first = self.isolation_fingerprint(id, "root with spaces")?;
                 let second = self.isolation_fingerprint(id, "røød-東京-🧪")?;
@@ -418,72 +373,6 @@ impl Runner {
                     anyhow::bail!("normalized fingerprints differ across roots");
                 }
                 json!({"normalizedSha256": sha256_bytes(first.as_bytes()), "equal": true})
-            }
-            "iso.standalone-fixture-independence" => {
-                let first = sandbox.artifact_dir.join("standalone-first.sqlite3");
-                let second = sandbox.artifact_dir.join("standalone-second.sqlite3");
-                let first_state = build_database(&self.suite_root, &first, true)?;
-                let second_state = build_database(&self.suite_root, &second, true)?;
-                if first_state.generated_message_ids != second_state.generated_message_ids
-                    || first_state.generated_timestamp_spellings
-                        != second_state.generated_timestamp_spellings
-                    || memory_access_count(&first, "01J00000000000000000000001")? != Some(2)
-                    || memory_access_count(&second, "01J00000000000000000000001")? != Some(2)
-                {
-                    anyhow::bail!("standalone fixture construction is not deterministic");
-                }
-                json!({
-                    "productCrateDependencies": 0,
-                    "schemaSha256": self.verification.fixture_hashes.get("sqlite-schema.sql"),
-                    "fixedMessageIdCount": first_state.generated_message_ids.len(),
-                    "logicalEquality": true
-                })
-            }
-            "iso.offline-contract-fixture" => {
-                let contract: Value = serde_json::from_slice(&fs::read(
-                    self.suite_root
-                        .join("contracts/mcp-2026-wire-contract.json"),
-                )?)?;
-                if contract.get("runtimeNetworkRequired") != Some(&Value::Bool(false))
-                    || contract.get("accessedAt").and_then(Value::as_str) != Some("2026-08-05")
-                {
-                    anyhow::bail!("offline MCP contract stamp differs");
-                }
-                json!({
-                    "runtimeNetworkRequired": false,
-                    "accessedAt": "2026-08-05",
-                    "contractSha256": self.verification.contract_hashes.get("mcp-2026-wire-contract.json")
-                })
-            }
-            "iso.normalization-pointer-allowlist" => {
-                let original = json!({"pid":99,"nested":{"pid":100,"dynamic":7},"items":[1,2,3]});
-                let normalized = crate::normalization::normalize_detail(
-                    "iso.mock-daemon-raii-cleanup",
-                    original,
-                )?;
-                if normalized.pointer("/pid") != Some(&json!("<PROCESS_ID>"))
-                    || normalized.pointer("/nested/pid") != Some(&json!(100))
-                    || normalized.pointer("/nested/dynamic") != Some(&json!(7))
-                    || normalized.pointer("/items") != Some(&json!([1, 2, 3]))
-                {
-                    anyhow::bail!("normalization changed an undeclared value or shape");
-                }
-                json!({"exactPointerOnly":true,"unknownSameNamedKeyPreserved":true,"shapePreserved":true})
-            }
-            "iso.threshold-bindings" => {
-                let missing = UnsupportedEvidence::Wire {
-                    methods: Vec::new(),
-                    statuses: Vec::new(),
-                    response_count: 0,
-                };
-                if validate_unsupported_evidence(&missing).is_ok() {
-                    anyhow::bail!("unsupported result without evidence was accepted");
-                }
-                json!({
-                    "typedThresholdCount": self.verification.bound_threshold_count,
-                    "thresholdSha256": self.verification.acceptance_thresholds_sha256,
-                    "missingUnsupportedEvidenceRejected": true
-                })
             }
             _ => anyhow::bail!("unknown isolation scenario {id}"),
         };
@@ -705,7 +594,7 @@ impl Runner {
         let execution = self.execute_mcp(
             id,
             McpExecutionConfig {
-                populated: true,
+                populated: id != "modern.structured-empty-results",
                 fixture_profile: FixtureProfile::Standard,
                 compact: false,
                 init: Init::None,
@@ -990,6 +879,27 @@ impl Runner {
                         }
                         json!({"__evaluationResponses":responses})
                     }
+                    "modern.structured-empty-results" => {
+                        let mut responses = Vec::new();
+                        for (index, (tool, arguments)) in
+                            empty_modern_emission_requests().into_iter().enumerate()
+                        {
+                            let response = modern_tool_call(
+                                client,
+                                index as u64 + 1,
+                                tool,
+                                arguments,
+                            )?;
+                            let supported = response
+                                .pointer("/result/structuredContent")
+                                .is_some();
+                            responses.push(response);
+                            if index == 0 && !supported {
+                                break;
+                            }
+                        }
+                        json!({"__emptyResponses":responses})
+                    }
                     _ => anyhow::bail!("unknown modern scenario {id}"),
                 };
                 let mut detail = validate_modern(&suite_root, &design, id, &response)?;
@@ -1028,9 +938,7 @@ impl Runner {
         let thresholds = self.verification.acceptance_thresholds.clone();
         if matches!(
             id,
-            "resource.internal-failure"
-                | "resource.templates-method-not-found"
-                | "resource.snapshot-concurrency"
+            "resource.internal-failure" | "resource.templates-method-not-found"
         ) {
             let probe = self.execute_mcp(
                 id,
@@ -1057,9 +965,6 @@ impl Runner {
                 .unwrap_or(false)
             {
                 return self.finish_unsupported(id, probe);
-            }
-            if id == "resource.snapshot-concurrency" {
-                return self.run_resource_snapshot(id);
             }
         }
         let execution = self.execute_mcp(
@@ -1199,128 +1104,6 @@ impl Runner {
         }
     }
 
-    fn run_resource_snapshot(&mut self, id: &str) -> Result<ScenarioResult> {
-        let sandbox = ScenarioSandbox::create(&self.work_root, &self.run_label, id, false)?;
-        let fixture = build_database(&self.suite_root, &sandbox.db, true)?;
-        augment_resource_database(&sandbox.db, false)?;
-        let pre_response = self.capture_resource_response(id, &sandbox)?;
-        let pre_text = resource_text(&pre_response)?.to_owned();
-
-        let ready_path = sandbox.artifact_dir.join("snapshot.ready");
-        let release_path = sandbox.artifact_dir.join("snapshot.release");
-        let response_path = sandbox.artifact_dir.join("snapshot-response.json");
-        let event_path = sandbox.artifact_dir.join("snapshot-events.jsonl");
-        let writer_db = sandbox.db.clone();
-        let writer_ready = ready_path.clone();
-        let writer_release = release_path.clone();
-        let writer = thread::spawn(move || -> Result<()> {
-            let deadline = Instant::now() + Duration::from_secs(8);
-            while !writer_ready.is_file() {
-                if Instant::now() >= deadline {
-                    anyhow::bail!("support hook never exposed the controlled read barrier");
-                }
-                thread::sleep(Duration::from_millis(20));
-            }
-            commit_resource_snapshot_writer(&writer_db)?;
-            fs::write(&writer_release, b"evaluator-writer-committed\n")?;
-            Ok(())
-        });
-        let support_result = self.run_evaluator_support(
-            id,
-            &sandbox,
-            &[
-                "resource-snapshot".to_owned(),
-                "--db".to_owned(),
-                sandbox.db.to_string_lossy().into_owned(),
-                "--ready-file".to_owned(),
-                ready_path.to_string_lossy().into_owned(),
-                "--release-file".to_owned(),
-                release_path.to_string_lossy().into_owned(),
-                "--response-file".to_owned(),
-                response_path.to_string_lossy().into_owned(),
-                "--event-journal".to_owned(),
-                event_path.to_string_lossy().into_owned(),
-            ],
-        );
-        let writer_result = writer
-            .join()
-            .map_err(|_| anyhow::anyhow!("resource snapshot writer thread panicked"))?;
-        writer_result?;
-        let _support_stdout = support_result?;
-
-        let post_response = self.capture_resource_response(id, &sandbox)?;
-        let post_text = resource_text(&post_response)?.to_owned();
-        if pre_text == post_text || !post_text.contains("RESOURCE-SNAPSHOT-POST-STATE-MARKER") {
-            anyhow::bail!("evaluator-controlled writer did not produce a distinct post state");
-        }
-        let response_bytes = fs::read(&response_path)
-            .context("resource support did not write the raw response artifact")?;
-        let support_response: Value = serde_json::from_slice(&response_bytes)
-            .context("resource support response artifact is not JSON")?;
-        let support_text = resource_text(&support_response)?;
-        let observed_state = if support_text == pre_text {
-            "pre"
-        } else if support_text == post_text {
-            "post"
-        } else {
-            anyhow::bail!("concurrent resource read exposed a mixed or fabricated state");
-        };
-        let event_bytes =
-            fs::read(&event_path).context("resource support did not write its event journal")?;
-        let events = validate_support_event_journal(
-            &event_bytes,
-            &[
-                "read-start",
-                "snapshot-acquired",
-                "barrier-ready",
-                "barrier-released",
-                "read-complete",
-            ],
-            Some(("read-complete", sha256_bytes(&response_bytes))),
-        )?;
-        sandbox.verify()?;
-        self.passed(
-            id,
-            json!({
-                "supported": true,
-                "fixtureProject": fixture.project_name,
-                "observedAtomicState": observed_state,
-                "preTextSha256": sha256_bytes(pre_text.as_bytes()),
-                "postTextSha256": sha256_bytes(post_text.as_bytes()),
-                "responseArtifactSha256": sha256_bytes(&response_bytes),
-                "eventJournalSha256": sha256_bytes(&event_bytes),
-                "eventCount": events.len()
-            }),
-            "",
-        )
-    }
-
-    fn capture_resource_response(&mut self, id: &str, sandbox: &ScenarioSandbox) -> Result<Value> {
-        let mut client = McpClient::spawn(&self.candidate, sandbox, false, &self.user_state)?;
-        let response = client.request_2026(
-            1,
-            "resources/read",
-            json!({"uri":"icm://active-project/context"}),
-        )?;
-        let detail = validate_resource(
-            "resource.read-values",
-            &response,
-            &self.verification.acceptance_thresholds,
-        )?;
-        if detail.get("supported").and_then(Value::as_bool) != Some(true) {
-            anyhow::bail!("snapshot control read unexpectedly lacks resource support");
-        }
-        let capture = client.shutdown()?;
-        self.record_raw(id, &capture.exchanges, &capture.stdout, &capture.stderr)?;
-        self.verify_capture(
-            sandbox,
-            &capture.exchanges,
-            &capture.stdout,
-            &capture.stderr,
-        )?;
-        Ok(response)
-    }
-
     fn run_provider(&mut self, id: &str) -> Result<ScenarioResult> {
         let mut parts = id.splitn(3, '.');
         let _prefix = parts.next();
@@ -1391,39 +1174,6 @@ impl Runner {
             fs::write(path, &document.initial)?;
         }
         prepare_provider_adversary(case_id, &provider.id, scope, &document_paths)?;
-        #[cfg(windows)]
-        if case_id == "symlink-reparse-zero-write" {
-            use std::os::windows::fs::MetadataExt;
-
-            let link_directory = document_paths
-                .first()
-                .and_then(|path| path.parent())
-                .context("provider reparse fixture has no parent directory")?;
-            let event_path = sandbox.artifact_dir.join("provider-reparse-events.jsonl");
-            let support_stdout = self.run_evaluator_support(
-                id,
-                &sandbox,
-                &[
-                    "provider-reparse".to_owned(),
-                    "--link-directory".to_owned(),
-                    link_directory.to_string_lossy().into_owned(),
-                    "--event-journal".to_owned(),
-                    event_path.to_string_lossy().into_owned(),
-                ],
-            )?;
-            let attributes = fs::metadata(link_directory)?.file_attributes();
-            const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
-            if attributes & FILE_ATTRIBUTE_REPARSE_POINT == 0 {
-                anyhow::bail!("Windows provider fixture lacks a real reparse-point attribute");
-            }
-            let event_bytes = fs::read(&event_path)?;
-            validate_support_event_journal(
-                &event_bytes,
-                &["source-moved", "junction-created", "metadata-observed"],
-                None,
-            )?;
-            let _ = support_stdout;
-        }
         let mut watched_paths = document_paths.clone();
         let mut before = read_document_set(scope, &document_paths)?;
         let mut watched_before = read_path_set(&watched_paths)?;
@@ -1445,9 +1195,7 @@ impl Runner {
             "external-equal-adopted-not-owned" => {
                 vec![("doctor", true), ("trust", true)]
             }
-            "malformed-config-zero-write"
-            | "unknown-dialect-zero-write"
-            | "symlink-reparse-zero-write" => vec![("trust", false)],
+            "malformed-config-zero-write" | "unknown-dialect-zero-write" => vec![("trust", false)],
             "exact-registration-syntax"
             | "exact-trust-syntax"
             | "apply-preserves-unrelated-bytes"
@@ -1568,7 +1316,6 @@ impl Runner {
                     | "malformed-config-zero-write"
                     | "unknown-dialect-zero-write"
                     | "ambiguous-path-zero-write"
-                    | "symlink-reparse-zero-write"
             );
         if zero_write
             && (after != before
@@ -1638,91 +1385,12 @@ impl Runner {
         }))
     }
 
-    fn run_provider_engine(&mut self, id: &str) -> Result<ScenarioResult> {
-        let sandbox = ScenarioSandbox::create(&self.work_root, &self.run_label, id, false)?;
-        let help =
-            self.run_candidate_command(id, &sandbox, &["provider".into(), "--help".into()])?;
-        if !help.status_success {
-            sandbox.verify()?;
-            return self.finish_unsupported(
-                id,
-                Execution {
-                    detail: json!({
-                        "supported":false,
-                        "reason":"provider-engine-production-surface-absent",
-                        "probeExitCode":help.exit_code,
-                        "probeStdout":help.stdout,
-                        "probeStderr":help.stderr
-                    }),
-                    transcript: help.transcript.clone(),
-                    unsupported_evidence: cli_unsupported_evidence(&help, &["provider", "--help"]),
-                },
-            );
-        }
-        let world = sandbox.artifact_dir.join("provider-engine-world");
-        fs::create_dir_all(&world)?;
-        let target_a = world.join("target-a.json");
-        let target_b = world.join("target-b.json");
-        let manifest_path = world.join("install-manifest.json");
-        fs::write(
-            &target_a,
-            b"{\"sentinel\":\"target-a-unchanged\",\"ownedRules\":[],\"externalRules\":[]}",
-        )?;
-        fs::write(
-            &target_b,
-            b"{\"sentinel\":\"target-b-unchanged\",\"ownedRules\":[],\"externalRules\":[]}",
-        )?;
-        let manifest_seed = if id == "provider.engine.schema1-migration-legacy-unproven" {
-            json!({"version":1,"legacyRules":[{"rule":"legacy-equal","provenOwned":false}]})
-        } else if id == "provider.engine.newer-manifest-read-only" {
-            json!({"version":999,"futureSentinel":"newer-manifest-unchanged"})
-        } else {
-            json!({"version":2,"providerOwnership":[]})
-        };
-        fs::write(&manifest_path, serde_json::to_vec_pretty(&manifest_seed)?)?;
-        if id == "provider.engine.orphan-temp-owned-only" {
-            fs::write(world.join(".icm-owned-transaction.tmp"), b"owned-temp")?;
-            fs::write(world.join("user-unowned.tmp"), b"unowned-temp-unchanged")?;
-        }
-        let before = hash_regular_files(&world)?;
-        let event_path = sandbox.artifact_dir.join("provider-engine-events.jsonl");
-        let _output = self.run_evaluator_support(
-            id,
-            &sandbox,
-            &[
-                "provider-engine".to_owned(),
-                "--case".to_owned(),
-                id.to_owned(),
-                "--world".to_owned(),
-                world.to_string_lossy().into_owned(),
-                "--event-journal".to_owned(),
-                event_path.to_string_lossy().into_owned(),
-            ],
-        )?;
-        let after = hash_regular_files(&world)?;
-        let event_bytes = fs::read(&event_path)
-            .context("provider engine support did not write an event journal")?;
-        let events = validate_provider_engine_case(id, &world, &before, &after, &event_bytes)?;
-        sandbox.verify()?;
-        self.passed(
-            id,
-            json!({
-                "supported":true,
-                "filesBefore":before,
-                "filesAfter":after,
-                "eventCount":events.len(),
-                "eventJournalSha256":sha256_bytes(&event_bytes)
-            }),
-            "",
-        )
-    }
-
     fn run_proxy(&mut self, id: &str) -> Result<ScenarioResult> {
         let mut sandbox = ScenarioSandbox::create(&self.work_root, &self.run_label, id, false)?;
         let help = self.run_candidate_command(id, &sandbox, &["proxy".into(), "--help".into()])?;
         if !help.status_success {
             sandbox.verify()?;
-            let execution = Execution {
+            let mut execution = Execution {
                 detail: json!({
                     "supported": false,
                     "probeExitCode": help.exit_code,
@@ -1734,6 +1402,12 @@ impl Runner {
                 unsupported_evidence: cli_unsupported_evidence(&help, &["proxy", "--help"]),
             };
             if id == "proxy.unsupported-baseline-proof" {
+                let evidence = execution
+                    .unsupported_evidence
+                    .as_ref()
+                    .context("baseline proof lacks a concrete public CLI result")?;
+                validate_unsupported_evidence(evidence)?;
+                execution.detail["unsupportedEvidence"] = serde_json::to_value(evidence)?;
                 return self.finish_execution(id, execution, false);
             }
             return self.finish_unsupported(id, execution);
@@ -1746,27 +1420,25 @@ impl Runner {
             );
         }
 
+        if id == "proxy.ipv6-loopback" && TcpListener::bind((Ipv6Addr::LOCALHOST, 0)).is_err() {
+            sandbox.verify()?;
+            return self.passed(
+                id,
+                json!({"supported":true,"hostCapability":"ipv6-loopback-unavailable"}),
+                &help.transcript,
+            );
+        }
+
         if matches!(
             id,
             "proxy.real-daemon-tools-list"
                 | "proxy.real-daemon-tool-call"
-                | "proxy.daemon-one-store-model"
                 | "proxy.real-daemon-cleanup"
         ) {
             return self.run_real_daemon_proxy(id, &sandbox);
         }
 
-        if matches!(
-            id,
-            "proxy.proxy-zero-store-model" | "proxy.dns-rebinding-target-pin"
-        ) {
-            return self.run_proxy_internal_observation(id, &sandbox);
-        }
-
-        if matches!(
-            id,
-            "proxy.userinfo-fragment-rejected" | "proxy.non-loopback-rejected"
-        ) {
+        if id == "proxy.userinfo-fragment-rejected" {
             return self.run_proxy_rejected_endpoint(id, &sandbox);
         }
 
@@ -2136,20 +1808,6 @@ impl Runner {
                     anyhow::bail!("shared daemon topology evidence incomplete");
                 }
             }
-            "proxy.daemon-one-store-model" => {
-                if records.is_empty()
-                    || records.iter().any(|record| {
-                        record.get("modelLoadCount").and_then(Value::as_u64)
-                            != Some(
-                                self.verification
-                                    .acceptance_thresholds
-                                    .daemon_model_load_count as u64,
-                            )
-                    })
-                {
-                    anyhow::bail!("evaluator-owned daemon model construction count is not one");
-                }
-            }
             "proxy.origin-host-headers" => {
                 let authority = daemon
                     .url
@@ -2353,7 +2011,7 @@ impl Runner {
         build_database(&self.suite_root, &sandbox.db, true)?;
         fs::write(
             &sandbox.config,
-            "[embeddings]\nenabled = true\nprovider = \"mock\"\n\n[memory]\nauto_consolidate_enabled = false\n",
+            "[embeddings]\nenabled = false\n\n[memory]\nauto_consolidate_enabled = false\n",
         )?;
         let mut daemon = self.start_real_candidate_daemon(sandbox)?;
         let mut proxy = McpClient::spawn_with_args(
@@ -2401,41 +2059,11 @@ impl Runner {
             &capture.stderr,
         )?;
         let daemon_pid = daemon.child.id()?;
-        let daemon_status = daemon.child.terminate()?;
+        daemon.child.terminate()?;
         let stderr = daemon
             .stderr_rx
             .recv_timeout(Duration::from_secs(2))
-            .unwrap_or_default();
-        let event_bytes = fs::read(&daemon.event_path)
-            .context("real daemon evaluation-build lifecycle journal is absent")?;
-        let events = validate_support_event_journal(
-            &event_bytes,
-            &[
-                "daemon-start",
-                "store-constructed",
-                "model-constructed",
-                "http-ready",
-            ],
-            None,
-        )?;
-        let store_count = events
-            .iter()
-            .filter(|event| event.get("event").and_then(Value::as_str) == Some("store-constructed"))
-            .count();
-        let model_count = events
-            .iter()
-            .filter(|event| event.get("event").and_then(Value::as_str) == Some("model-constructed"))
-            .count();
-        if store_count != 1 || model_count != 1 {
-            anyhow::bail!(
-                "real daemon constructed store/model {store_count}/{model_count} times instead of 1/1"
-            );
-        }
-        if daemon_status.success() {
-            // A terminated long-running server may report either a signal or a
-            // graceful status; process reaping, not the platform status code,
-            // is the portable cleanup invariant.
-        }
+            .context("timed out collecting real daemon stderr")??;
         sandbox.verify_nondisclosure(&String::from_utf8_lossy(&stderr))?;
         sandbox.verify()?;
         self.passed(
@@ -2446,9 +2074,6 @@ impl Runner {
                 "proxyPid":proxy_pid,
                 "daemonPid":daemon_pid,
                 "daemonReaped":true,
-                "storeConstructionCount":store_count,
-                "modelConstructionCount":model_count,
-                "eventJournalSha256":sha256_bytes(&event_bytes),
                 "responseSha256":sha256_bytes(serde_json::to_string(&response)?.as_bytes())
             }),
             &normalize_transcript(&capture.exchanges, &empty_fixture_state()),
@@ -2456,10 +2081,6 @@ impl Runner {
     }
 
     fn start_real_candidate_daemon(&self, sandbox: &ScenarioSandbox) -> Result<RealDaemon> {
-        let data_root = sandbox_env_path(sandbox, "XDG_DATA_HOME")?;
-        let event_path = data_root
-            .join("icm")
-            .join("evaluator-only-daemon-events.jsonl");
         let arguments = vec![
             "--db".to_owned(),
             sandbox.db.to_string_lossy().into_owned(),
@@ -2492,18 +2113,13 @@ impl Runner {
         let (ready_tx, ready_rx) = mpsc::channel();
         thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
-            let mut ready = String::new();
-            let result = reader.read_line(&mut ready).map(|_| ready);
+            let result = read_ready_line(&mut reader);
             let _ = ready_tx.send(result);
-            let mut discard = Vec::new();
-            let _ = reader.read_to_end(&mut discard);
+            let _ = read_bounded_to_end(reader, MAX_CAPTURE_BYTES);
         });
         let (stderr_tx, stderr_rx) = mpsc::channel();
         thread::spawn(move || {
-            let mut reader = BufReader::new(stderr);
-            let mut bytes = Vec::new();
-            let _ = reader.read_to_end(&mut bytes);
-            let _ = stderr_tx.send(bytes);
+            let _ = stderr_tx.send(read_bounded_to_end(stderr, MAX_CAPTURE_BYTES));
         });
         let ready = ready_rx
             .recv_timeout(Duration::from_secs(10))
@@ -2517,109 +2133,8 @@ impl Runner {
         Ok(RealDaemon {
             child,
             url,
-            event_path,
             stderr_rx,
         })
-    }
-
-    fn run_proxy_internal_observation(
-        &mut self,
-        id: &str,
-        sandbox: &ScenarioSandbox,
-    ) -> Result<ScenarioResult> {
-        let mut daemon = self.start_mock_daemon_mode(sandbox, "normal", false)?;
-        let event_path = sandbox.artifact_dir.join("proxy-observation-events.jsonl");
-        let counter_path = sandbox.artifact_dir.join("proxy-observation-counters.json");
-        let exchange_path = sandbox.artifact_dir.join("proxy-observation-exchange.json");
-        let _support_stdout = self.run_evaluator_support(
-            id,
-            sandbox,
-            &[
-                "proxy-observe".to_owned(),
-                "--case".to_owned(),
-                id.to_owned(),
-                "--url".to_owned(),
-                daemon.url.clone(),
-                "--event-journal".to_owned(),
-                event_path.to_string_lossy().into_owned(),
-                "--counter-file".to_owned(),
-                counter_path.to_string_lossy().into_owned(),
-                "--exchange-file".to_owned(),
-                exchange_path.to_string_lossy().into_owned(),
-            ],
-        )?;
-        shutdown_mock_daemon(&daemon.url)?;
-        let status = daemon.child.wait_timeout(Duration::from_secs(5))?;
-        if !status.success() {
-            anyhow::bail!("proxy observation daemon exited unsuccessfully");
-        }
-        let records = read_json_lines(&daemon.record_path)?;
-        assert_recorded_loopback_endpoints(&records)?;
-        let exchange_bytes = fs::read(&exchange_path)
-            .context("proxy internal observation lacks raw exchange artifact")?;
-        let exchange: Value = serde_json::from_slice(&exchange_bytes)
-            .context("proxy internal exchange artifact is not JSON")?;
-        let request = exchange
-            .get("request")
-            .and_then(Value::as_str)
-            .context("proxy internal exchange lacks raw request")?;
-        let recorded_body = records
-            .first()
-            .and_then(|record| record.get("body"))
-            .and_then(Value::as_str)
-            .context("observation daemon recorded no raw request")?;
-        if request.trim_end() != recorded_body
-            || exchange.get("response").and_then(Value::as_str).is_none()
-        {
-            anyhow::bail!("proxy support exchange does not match evaluator-owned daemon bytes");
-        }
-        let counters: Value = serde_json::from_slice(&fs::read(&counter_path)?)?;
-        if counters
-            .get("proxyStoreModelConstructions")
-            .and_then(Value::as_u64)
-            != Some(0)
-        {
-            anyhow::bail!("proxy process constructed store/model state");
-        }
-        if id == "proxy.dns-rebinding-target-pin"
-            && (counters
-                .pointer("/resolver/initialAddress")
-                .and_then(Value::as_str)
-                != Some("127.0.0.1")
-                || counters
-                    .pointer("/resolver/reboundAddress")
-                    .and_then(Value::as_str)
-                    != Some("127.0.0.2")
-                || counters.pointer("/resolver/connectedAddresses") != Some(&json!(["127.0.0.1"])))
-        {
-            anyhow::bail!("injected resolver trace does not prove one pinned initial address");
-        }
-        let event_bytes =
-            fs::read(&event_path).context("proxy internal observation lacks event journal")?;
-        let events = validate_support_event_journal(
-            &event_bytes,
-            &[
-                "observation-installed",
-                "proxy-start",
-                "request-forwarded",
-                "response-received",
-                "proxy-stop",
-            ],
-            Some(("response-received", sha256_bytes(&exchange_bytes))),
-        )?;
-        sandbox.verify()?;
-        self.passed(
-            id,
-            json!({
-                "supported":true,
-                "rawExchangeSha256":sha256_bytes(&exchange_bytes),
-                "eventJournalSha256":sha256_bytes(&event_bytes),
-                "counterSha256":sha256_file(&counter_path)?,
-                "eventCount":events.len(),
-                "daemonRecordCount":records.len()
-            }),
-            "",
-        )
     }
 
     fn run_proxy_rejected_endpoint(
@@ -2627,24 +2142,16 @@ impl Runner {
         id: &str,
         sandbox: &ScenarioSandbox,
     ) -> Result<ScenarioResult> {
-        let mut daemon = if id == "proxy.userinfo-fragment-rejected" {
-            Some(self.start_mock_daemon_mode(sandbox, "normal", false)?)
-        } else {
-            None
-        };
-        let urls = if let Some(daemon) = daemon.as_ref() {
-            let authority = daemon
-                .url
-                .strip_prefix("http://")
-                .and_then(|value| value.split('/').next())
-                .context("mock daemon URL lacks authority")?;
-            vec![
-                format!("http://synthetic-user@{authority}/"),
-                format!("http://{authority}/#synthetic-fragment"),
-            ]
-        } else {
-            vec!["http://192.0.2.1:9/".to_owned()]
-        };
+        let mut daemon = self.start_mock_daemon_mode(sandbox, "normal", false)?;
+        let authority = daemon
+            .url
+            .strip_prefix("http://")
+            .and_then(|value| value.split('/').next())
+            .context("mock daemon URL lacks authority")?;
+        let urls = [
+            format!("http://synthetic-user@{authority}/"),
+            format!("http://{authority}/#synthetic-fragment"),
+        ];
         let mut outcomes = Vec::new();
         for url in &urls {
             let start = Instant::now();
@@ -2672,18 +2179,16 @@ impl Runner {
                     "proxy did not reject forbidden endpoint within its bounded response window"
                 );
             }
-            outcomes.push(json!({"urlKind":if url.contains('@') {"userinfo"} else if url.contains('#') {"fragment"} else {"non-loopback"},"rejected":true}));
+            outcomes.push(json!({"urlKind":if url.contains('@') {"userinfo"} else {"fragment"},"rejected":true}));
         }
-        if let Some(daemon) = daemon.as_mut() {
-            let before_shutdown = read_json_lines(&daemon.record_path).unwrap_or_default();
-            if !before_shutdown.is_empty() {
-                anyhow::bail!("proxy connected before rejecting userinfo/fragment URL");
-            }
-            shutdown_mock_daemon(&daemon.url)?;
-            let status = daemon.child.wait_timeout(Duration::from_secs(5))?;
-            if !status.success() {
-                anyhow::bail!("endpoint rejection daemon failed during cleanup");
-            }
+        let before_shutdown = read_json_lines(&daemon.record_path).unwrap_or_default();
+        if !before_shutdown.is_empty() {
+            anyhow::bail!("proxy connected before rejecting userinfo/fragment URL");
+        }
+        shutdown_mock_daemon(&daemon.url)?;
+        let status = daemon.child.wait_timeout(Duration::from_secs(5))?;
+        if !status.success() {
+            anyhow::bail!("endpoint rejection daemon failed during cleanup");
         }
         sandbox.verify()?;
         self.passed(id, json!({"supported":true,"outcomes":outcomes}), "")
@@ -3071,7 +2576,7 @@ impl Runner {
             McpExecutionConfig {
                 populated: true,
                 fixture_profile: FixtureProfile::Standard,
-                compact: false,
+                compact: true,
                 init: Init::Legacy,
                 fault_database: false,
             },
@@ -3113,7 +2618,6 @@ impl Runner {
     }
 
     fn run_latency_metrics(&mut self, id: &str) -> Result<ScenarioResult> {
-        let thresholds = self.verification.acceptance_thresholds.clone();
         let execution = self.execute_mcp(
             id,
             McpExecutionConfig {
@@ -3141,14 +2645,14 @@ impl Runner {
                 let mut output = serde_json::Map::new();
                 let mut call_id = 10_u64;
                 for (name, request) in operations {
-                    for _ in 0..thresholds.latency_warmups_per_operation {
+                    for _ in 0..LATENCY_WARMUPS_PER_OPERATION {
                         client.request(request(call_id))?;
                         call_id += 1;
                     }
                     let mut blocks = Vec::new();
-                    for _ in 0..thresholds.latency_block_count {
+                    for _ in 0..LATENCY_BLOCK_COUNT {
                         let mut block = Vec::new();
-                        for _ in 0..thresholds.latency_samples_per_block {
+                        for _ in 0..LATENCY_SAMPLES_PER_BLOCK {
                             let start = Instant::now();
                             client.request(request(call_id))?;
                             block.push(start.elapsed().as_micros());
@@ -3170,56 +2674,7 @@ impl Runner {
             .context("latency detail is not object")?;
         for (name, value) in object {
             let actual: LatencySummary = serde_json::from_value(value.clone())?;
-            if !latency_shape_matches(&actual, &self.verification.acceptance_thresholds) {
-                anyhow::bail!("latency metric {name} lacks exact typed block/sample evidence");
-            }
             self.metrics.latency.insert(name.clone(), actual);
-        }
-        if self.mode == EvaluationMode::Candidate {
-            let baseline: Value = serde_json::from_slice(&fs::read(
-                self.suite_root.join("goldens/baseline-metrics.json"),
-            )?)?;
-            for (name, actual) in &self.metrics.latency {
-                let pointer_name = name.replace('/', "~1");
-                let baseline_median = baseline
-                    .pointer(&format!("/latencyMicros/{pointer_name}/median"))
-                    .and_then(Value::as_u64)
-                    .with_context(|| format!("baseline median absent for {name}"))?
-                    as u128;
-                let baseline_p95 = baseline
-                    .pointer(&format!("/latencyMicros/{pointer_name}/p95"))
-                    .and_then(Value::as_u64)
-                    .with_context(|| format!("baseline p95 absent for {name}"))?
-                    as u128;
-                let (median_limit, p95_limit) = latency_limits(
-                    baseline_median,
-                    baseline_p95,
-                    &self.verification.acceptance_thresholds,
-                )?;
-                if actual.median_micros > median_limit || actual.p95_micros > p95_limit {
-                    anyhow::bail!(
-                        "latency regression for {name}: median {} > {median_limit} or p95 {} > {p95_limit} microseconds",
-                        actual.median_micros,
-                        actual.p95_micros
-                    );
-                }
-                let interpretation = if baseline_median > actual.median_micros
-                    && baseline_median - actual.median_micros
-                        <= self
-                            .verification
-                            .acceptance_thresholds
-                            .latency_noise_floor_micros
-                {
-                    "inconclusive-below-noise-floor"
-                } else if baseline_median > actual.median_micros {
-                    "measured-lower-latency"
-                } else {
-                    "not-lower"
-                };
-                self.metrics
-                    .latency_interpretation
-                    .insert(name.clone(), interpretation.to_owned());
-            }
         }
         self.finish_execution(id, execution, false)
     }
@@ -3535,63 +2990,6 @@ impl Runner {
         })
     }
 
-    fn run_evaluator_support(
-        &mut self,
-        id: &str,
-        sandbox: &ScenarioSandbox,
-        arguments: &[String],
-    ) -> Result<Value> {
-        let candidate_parent = self
-            .candidate
-            .parent()
-            .context("candidate has no parent directory")?;
-        let support_name = if cfg!(windows) {
-            "icm-eval-support.exe"
-        } else {
-            "icm-eval-support"
-        };
-        let support = candidate_parent.join(support_name);
-        if !support.is_file() {
-            anyhow::bail!(
-                "candidate supports the production feature but required compile-time evaluator-only support binary is absent: {}",
-                support.display()
-            );
-        }
-        sandbox.verify_child_context(arguments, &self.user_state)?;
-        let mut command = Command::new(&support);
-        command
-            .args(arguments)
-            .env_clear()
-            .envs(sandbox.environment.clone())
-            .current_dir(&sandbox.cwd)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let output = run_guarded_command(command, Duration::from_secs(20))
-            .with_context(|| format!("running evaluator-only support for {id}"))?;
-        let stdout = String::from_utf8(output.stdout)?;
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        if !output.status.success() {
-            anyhow::bail!("evaluator-only support failed for {id}: {stderr}");
-        }
-        sandbox.verify_nondisclosure(&format!("{stdout}\n{stderr}"))?;
-        scan_for_real_path_leaks(
-            &format!("{stdout}\n{stderr}"),
-            self.user_state.leak_strings(),
-        )?;
-        let value: Value = serde_json::from_str(stdout.trim())
-            .context("evaluator-only support stdout is not one JSON object")?;
-        self.raw_lines.push(serde_json::to_string(&json!({
-            "scenario":id,
-            "evaluatorSupport":{
-                "binary":"icm-eval-support",
-                "arguments":arguments,
-                "result":value
-            }
-        }))?);
-        Ok(value)
-    }
-
     fn start_mock_daemon(&self, sandbox: &ScenarioSandbox) -> Result<MockDaemon> {
         self.start_mock_daemon_mode(sandbox, "normal", false)
     }
@@ -3632,8 +3030,7 @@ impl Runner {
         let (ready_tx, ready_rx) = mpsc::channel();
         thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
-            let mut ready = String::new();
-            let result = reader.read_line(&mut ready).map(|_| ready);
+            let result = read_ready_line(&mut reader);
             let _ = ready_tx.send(result);
         });
         let ready = ready_rx
@@ -3697,8 +3094,7 @@ struct MockDaemon {
 struct RealDaemon {
     child: ChildGuard,
     url: String,
-    event_path: PathBuf,
-    stderr_rx: mpsc::Receiver<Vec<u8>>,
+    stderr_rx: mpsc::Receiver<io::Result<Vec<u8>>>,
 }
 
 struct ChildGuard {
@@ -3742,9 +3138,8 @@ impl ChildGuard {
     }
 
     fn terminate(&mut self) -> Result<ExitStatus> {
-        let child = self.child_mut()?;
-        let _ = child.kill();
-        child.wait().context("waiting for terminated child")
+        let _ = self.child_mut()?.kill();
+        self.wait_timeout(Duration::from_secs(2))
     }
 }
 
@@ -3752,7 +3147,13 @@ impl Drop for ChildGuard {
     fn drop(&mut self) {
         if let Some(child) = self.child.as_mut() {
             let _ = child.kill();
-            let _ = child.wait();
+            let deadline = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < deadline {
+                match child.try_wait() {
+                    Ok(Some(_)) | Err(_) => break,
+                    Ok(None) => thread::sleep(Duration::from_millis(10)),
+                }
+            }
         }
         self.child = None;
     }
@@ -3772,17 +3173,11 @@ fn run_guarded_command(command: Command, timeout: Duration) -> Result<Output> {
         .context("guarded command stderr unavailable")?;
     let (stdout_tx, stdout_rx) = mpsc::channel();
     thread::spawn(move || {
-        let mut reader = BufReader::new(stdout);
-        let mut bytes = Vec::new();
-        let result = reader.read_to_end(&mut bytes).map(|_| bytes);
-        let _ = stdout_tx.send(result);
+        let _ = stdout_tx.send(read_bounded_to_end(stdout, MAX_CAPTURE_BYTES));
     });
     let (stderr_tx, stderr_rx) = mpsc::channel();
     thread::spawn(move || {
-        let mut reader = BufReader::new(stderr);
-        let mut bytes = Vec::new();
-        let result = reader.read_to_end(&mut bytes).map(|_| bytes);
-        let _ = stderr_tx.send(result);
+        let _ = stderr_tx.send(read_bounded_to_end(stderr, MAX_CAPTURE_BYTES));
     });
     let status = child.wait_timeout(timeout)?;
     let stdout = stdout_rx
@@ -3796,6 +3191,22 @@ fn run_guarded_command(command: Command, timeout: Duration) -> Result<Output> {
         stdout,
         stderr,
     })
+}
+
+fn read_ready_line(reader: &mut impl BufRead) -> io::Result<String> {
+    let mut bytes = Vec::new();
+    match read_capped_line(reader, &mut bytes, 4 * 1024)? {
+        Some(true) => String::from_utf8(bytes)
+            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error)),
+        Some(false) => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "daemon readiness line exceeded 4096 bytes",
+        )),
+        None => Err(io::Error::new(
+            io::ErrorKind::UnexpectedEof,
+            "daemon closed before readiness line",
+        )),
+    }
 }
 
 fn validate_legacy(id: &str, response: &Value, _sandbox: &ScenarioSandbox) -> Result<()> {
@@ -3940,7 +3351,10 @@ fn validate_legacy(id: &str, response: &Value, _sandbox: &ScenarioSandbox) -> Re
 
 fn validate_modern(suite_root: &Path, design: &Value, id: &str, response: &Value) -> Result<Value> {
     if id == "modern.schema-valid-real-emissions" {
-        return validate_all_modern_emissions(suite_root, response);
+        return validate_all_modern_emissions(suite_root, design, response);
+    }
+    if id == "modern.structured-empty-results" {
+        return validate_empty_modern_emissions(suite_root, design, response);
     }
     if id.starts_with("modern.lifecycle-") {
         return validate_protocol_lifecycle(id, response);
@@ -4103,6 +3517,7 @@ fn validate_modern(suite_root: &Path, design: &Value, id: &str, response: &Value
                 suite_root.join("contracts/modern-output-schemas.json"),
             )?)?;
             schema::validate_tool_output(&contract, "icm_memory_recall", structured)?;
+            validate_populated_structured("icm_memory_recall", structured)?;
         }
         "modern.2025-resources-list-projection" | "modern.2025-resources-read-projection" => {
             let projection = result(response)?;
@@ -4138,18 +3553,12 @@ fn validate_modern(suite_root: &Path, design: &Value, id: &str, response: &Value
                 suite_root.join("contracts/modern-output-schemas.json"),
             )?)?;
             schema::validate_tool_output(&contract, tool, structured)?;
-            if other == "modern.concise-text-no-duplication" {
-                let text = text_content(response)?;
-                let structured_json = serde_json::to_string(structured)?;
-                if text.len() > thresholds.modern_concise_text_max_bytes
-                    || text.contains(&structured_json)
-                {
-                    anyhow::bail!(
-                        "modern text duplicates structured payload or exceeds {} bytes",
-                        thresholds.modern_concise_text_max_bytes
-                    );
-                }
-            }
+            validate_populated_structured(tool, structured)?;
+            validate_concise_text(
+                response,
+                structured,
+                thresholds.modern_concise_text_max_bytes,
+            )?;
         }
         _ => anyhow::bail!("no modern validator for preregistered scenario {id}"),
     }
@@ -4371,7 +3780,11 @@ fn validate_modern_tool_list(suite_root: &Path, id: &str, response: &Value) -> R
     Ok(())
 }
 
-fn validate_all_modern_emissions(suite_root: &Path, response: &Value) -> Result<Value> {
+fn validate_all_modern_emissions(
+    suite_root: &Path,
+    design: &Value,
+    response: &Value,
+) -> Result<Value> {
     let responses = response
         .get("__evaluationResponses")
         .and_then(Value::as_array)
@@ -4394,6 +3807,12 @@ fn validate_all_modern_emissions(suite_root: &Path, response: &Value) -> Result<
     let contract: Value = serde_json::from_slice(&fs::read(
         suite_root.join("contracts/modern-output-schemas.json"),
     )?)?;
+    let thresholds: crate::design::AcceptanceThresholds = serde_json::from_value(
+        design
+            .get("acceptanceThresholds")
+            .context("acceptance thresholds missing")?
+            .clone(),
+    )?;
     for (response, (tool, _)) in responses.iter().zip(requests) {
         let modern_result = require_modern_success(response, false)?;
         require_tool_success_shape(modern_result)?;
@@ -4401,8 +3820,318 @@ fn validate_all_modern_emissions(suite_root: &Path, response: &Value) -> Result<
             .get("structuredContent")
             .context("structuredContent missing")?;
         schema::validate_tool_output(&contract, tool, structured)?;
+        validate_concise_text(
+            response,
+            structured,
+            thresholds.modern_concise_text_max_bytes,
+        )?;
     }
     Ok(json!({"supported":true,"responses":responses,"validatedToolCount":11}))
+}
+
+fn validate_empty_modern_emissions(
+    suite_root: &Path,
+    design: &Value,
+    response: &Value,
+) -> Result<Value> {
+    let responses = response
+        .get("__emptyResponses")
+        .and_then(Value::as_array)
+        .context("empty modern emissions wrapper missing")?;
+    if responses
+        .first()
+        .and_then(|value| value.pointer("/result/structuredContent"))
+        .is_none()
+    {
+        return Ok(
+            json!({"supported":false,"responses":responses,"reason":"structuredContent-absent"}),
+        );
+    }
+    let requests = empty_modern_emission_requests();
+    if responses.len() != requests.len() {
+        anyhow::bail!(
+            "empty structured emission coverage is {} of 7",
+            responses.len()
+        );
+    }
+    let contract: Value = serde_json::from_slice(&fs::read(
+        suite_root.join("contracts/modern-output-schemas.json"),
+    )?)?;
+    let thresholds: crate::design::AcceptanceThresholds = serde_json::from_value(
+        design
+            .get("acceptanceThresholds")
+            .context("acceptance thresholds missing")?
+            .clone(),
+    )?;
+    let expected = [
+        ("icm_memory_recall", "/memories", json!([])),
+        ("icm_memory_list_topics", "/topics", json!([])),
+        ("icm_memory_stats", "/totalMemories", json!(0)),
+        ("icm_transcript_search", "/hits", json!([])),
+        ("icm_transcript_stats", "/totalSessions", json!(0)),
+        ("icm_feedback_search", "/feedback", json!([])),
+        ("icm_feedback_stats", "/total", json!(0)),
+    ];
+    for ((response, (tool, _)), (expected_tool, pointer, expected_value)) in
+        responses.iter().zip(requests).zip(expected)
+    {
+        if tool != expected_tool {
+            anyhow::bail!("empty structured tool order drifted");
+        }
+        let modern_result = require_modern_success(response, false)?;
+        require_tool_success_shape(modern_result)?;
+        let structured = modern_result
+            .get("structuredContent")
+            .context("empty structuredContent missing")?;
+        schema::validate_tool_output(&contract, tool, structured)?;
+        if structured.pointer(pointer) != Some(&expected_value) {
+            anyhow::bail!("{tool} empty value at {pointer} is not {expected_value}");
+        }
+        match tool {
+            "icm_memory_list_topics" => {
+                if structured.get("totalTopics") != Some(&json!(0))
+                    || structured.get("totalMemories") != Some(&json!(0))
+                {
+                    anyhow::bail!("empty memory topic totals are not zero");
+                }
+            }
+            "icm_memory_stats" => {
+                if structured.get("totalTopics") != Some(&json!(0))
+                    || structured.get("averageWeight") != Some(&json!(0.0))
+                    || structured.get("oldestMemory") != Some(&Value::Null)
+                    || structured.get("newestMemory") != Some(&Value::Null)
+                {
+                    anyhow::bail!("empty memory statistics are inconsistent");
+                }
+            }
+            "icm_transcript_stats" => {
+                for field in ["totalMessages", "totalBytes"] {
+                    if structured.get(field) != Some(&json!(0)) {
+                        anyhow::bail!("empty transcript {field} is not zero");
+                    }
+                }
+                for field in ["byRole", "byAgent", "topSessions"] {
+                    if structured.get(field) != Some(&json!([])) {
+                        anyhow::bail!("empty transcript {field} is not []");
+                    }
+                }
+                if structured.get("oldest") != Some(&Value::Null)
+                    || structured.get("newest") != Some(&Value::Null)
+                {
+                    anyhow::bail!("empty transcript timestamps are not null");
+                }
+            }
+            "icm_feedback_stats" => {
+                if structured.get("byTopic") != Some(&json!([]))
+                    || structured.get("mostApplied") != Some(&json!([]))
+                {
+                    anyhow::bail!("empty feedback statistics are inconsistent");
+                }
+            }
+            _ => {}
+        }
+        validate_concise_text(
+            response,
+            structured,
+            thresholds.modern_concise_text_max_bytes,
+        )?;
+    }
+    Ok(json!({"supported":true,"responses":responses,"validatedToolCount":7}))
+}
+
+fn validate_populated_structured(tool: &str, value: &Value) -> Result<()> {
+    match tool {
+        "icm_memory_recall" => {
+            let memories = value
+                .get("memories")
+                .and_then(Value::as_array)
+                .context("structured recall memories missing")?;
+            if value.get("query").and_then(Value::as_str) != Some("SQLite WAL")
+                || memories
+                    .first()
+                    .and_then(|memory| memory.get("id"))
+                    .and_then(Value::as_str)
+                    != Some("01J00000000000000000000001")
+            {
+                anyhow::bail!("structured recall lost the fixture query or rank order");
+            }
+        }
+        "icm_memory_list_topics" => {
+            if value
+                != &json!({
+                    "topics":[
+                        {"topic":"context-eval-project","count":8},
+                        {"topic":"context-other-project","count":1},
+                        {"topic":"decisions:eval-project","count":1},
+                        {"topic":"misc","count":1},
+                        {"topic":"preferences","count":1}
+                    ],
+                    "totalTopics":5,
+                    "totalMemories":12
+                })
+            {
+                anyhow::bail!("structured topic values or ordering differ from the fixture");
+            }
+        }
+        "icm_memory_stats" => {
+            let average = value
+                .get("averageWeight")
+                .and_then(Value::as_f64)
+                .context("structured averageWeight missing")?;
+            if value.get("totalMemories") != Some(&json!(12))
+                || value.get("totalTopics") != Some(&json!(5))
+                || (average - (10.24_f64 / 12.0)).abs() > 1e-9
+                || value.get("oldestMemory") != Some(&json!("2024-01-01T00:00:00Z"))
+                || value.get("newestMemory") != Some(&json!("2024-01-14T00:00:00Z"))
+            {
+                anyhow::bail!("structured memory statistics differ from fixture values");
+            }
+        }
+        "icm_transcript_start_session" => {
+            require_generated_id(value.get("sessionId"), "sessionId")?;
+        }
+        "icm_transcript_record" => {
+            require_generated_id(value.get("messageId"), "messageId")?;
+        }
+        "icm_transcript_search" => {
+            let first = value
+                .pointer("/hits/0")
+                .context("structured transcript search returned no fixture hit")?;
+            if first.pointer("/message/id").and_then(Value::as_str)
+                != Some("01J20000000000000000000002")
+                || first.pointer("/message/content").and_then(Value::as_str)
+                    != Some("Explain SQLite WAL ordering.")
+                || first.pointer("/session/id").and_then(Value::as_str)
+                    != Some("synthetic-session-fixed-001")
+            {
+                anyhow::bail!("structured transcript search values or ordering differ");
+            }
+        }
+        "icm_transcript_show" => {
+            if value.pointer("/session/id").and_then(Value::as_str)
+                != Some("synthetic-session-fixed-001")
+            {
+                anyhow::bail!("structured transcript show returned the wrong session");
+            }
+            let messages = value
+                .get("messages")
+                .and_then(Value::as_array)
+                .context("structured transcript messages missing")?;
+            let ids: Vec<_> = messages
+                .iter()
+                .filter_map(|message| message.get("id").and_then(Value::as_str))
+                .collect();
+            let expected: Vec<_> = (1..=4).map(|index| format!("01J2{index:022}")).collect();
+            if ids != expected.iter().map(String::as_str).collect::<Vec<_>>() {
+                anyhow::bail!("structured transcript messages lost chronological ordering");
+            }
+        }
+        "icm_transcript_stats" => {
+            if value.get("totalSessions") != Some(&json!(1))
+                || value.get("totalMessages") != Some(&json!(4))
+                || value.get("totalBytes") != Some(&json!(105))
+                || value.get("byRole")
+                    != Some(&json!([
+                        {"role":"assistant","count":1},
+                        {"role":"system","count":1},
+                        {"role":"tool","count":1},
+                        {"role":"user","count":1}
+                    ]))
+                || value.get("byAgent") != Some(&json!([{"agent":"cleanroom-evaluator","count":1}]))
+                || value.get("topSessions")
+                    != Some(&json!([{"sessionId":"synthetic-session-fixed-001","messageCount":4}]))
+                || value.get("oldest") != Some(&json!("2024-03-01T00:00:01Z"))
+                || value.get("newest") != Some(&json!("2024-03-01T00:00:04Z"))
+            {
+                anyhow::bail!("structured transcript statistics differ from legacy ordering");
+            }
+        }
+        "icm_feedback_record" => {
+            require_generated_id(value.get("id"), "feedback id")?;
+            require_utc_z(value.get("createdAt"), "feedback createdAt")?;
+            if value.get("topic") != Some(&json!("modern"))
+                || value.get("context") != Some(&json!("synthetic"))
+                || value.get("predicted") != Some(&json!("a"))
+                || value.get("corrected") != Some(&json!("b"))
+                || value.get("reason") != Some(&Value::Null)
+                || value.get("source") != Some(&json!("eval"))
+                || value.get("appliedCount") != Some(&json!(0))
+            {
+                anyhow::bail!("structured recorded feedback is not the direct written DTO");
+            }
+        }
+        "icm_feedback_search" => {
+            let first = value
+                .pointer("/feedback/0")
+                .context("structured feedback search returned no fixture match")?;
+            if first.get("id") != Some(&json!("01J10000000000000000000001"))
+                || first.get("corrected") != Some(&json!("Route to documentation reviewer."))
+            {
+                anyhow::bail!("structured feedback search values or ordering differ");
+            }
+        }
+        "icm_feedback_stats" => {
+            if value.get("total") != Some(&json!(3))
+                || value.get("byTopic")
+                    != Some(&json!([
+                        {"topic":"routing","count":2},
+                        {"topic":"security","count":1}
+                    ]))
+                || value.get("mostApplied")
+                    != Some(&json!([
+                        {"feedbackId":"01J10000000000000000000001","count":3},
+                        {"feedbackId":"01J10000000000000000000002","count":1}
+                    ]))
+            {
+                anyhow::bail!("structured feedback statistics differ from legacy ordering");
+            }
+        }
+        _ => anyhow::bail!("no semantic fixture validator for {tool}"),
+    }
+    Ok(())
+}
+
+fn validate_concise_text(response: &Value, structured: &Value, limit: usize) -> Result<()> {
+    let text = text_content(response)?;
+    let structured_json = serde_json::to_string(structured)?;
+    if text.len() > limit
+        || text.contains('\n')
+        || text.contains(&structured_json)
+        || [
+            "SQLite WAL mode coordinates",
+            "Explain SQLite WAL ordering",
+            "Route to documentation reviewer",
+        ]
+        .iter()
+        .any(|fixture| text.contains(fixture))
+    {
+        anyhow::bail!("modern text is not a concise content-free summary within {limit} bytes");
+    }
+    Ok(())
+}
+
+fn require_generated_id(value: Option<&Value>, label: &str) -> Result<()> {
+    let value = value
+        .and_then(Value::as_str)
+        .with_context(|| format!("structured {label} missing"))?;
+    if value.len() != 26
+        || !value
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric())
+    {
+        anyhow::bail!("structured {label} is not a 26-character identifier");
+    }
+    Ok(())
+}
+
+fn require_utc_z(value: Option<&Value>, label: &str) -> Result<()> {
+    let value = value
+        .and_then(Value::as_str)
+        .with_context(|| format!("structured {label} missing"))?;
+    if !value.ends_with('Z') || chrono::DateTime::parse_from_rfc3339(value).is_err() {
+        anyhow::bail!("structured {label} does not preserve UTC Z spelling");
+    }
+    Ok(())
 }
 
 fn require_modern_success(response: &Value, cacheable: bool) -> Result<&Value> {
@@ -4620,10 +4349,11 @@ fn validate_resource(
         .iter()
         .filter_map(|memory| memory.get("summary").and_then(Value::as_str))
         .collect();
-    let ids: BTreeSet<_> = memories
+    let ordered_ids: Vec<_> = memories
         .iter()
         .filter_map(|memory| memory.get("id").and_then(Value::as_str))
         .collect();
+    let ids: BTreeSet<_> = ordered_ids.iter().copied().collect();
     let reasons: BTreeSet<_> = parsed
         .get("truncationReasons")
         .and_then(Value::as_array)
@@ -4668,6 +4398,12 @@ fn validate_resource(
                 ])
                 .as_array()
                 .expect("literal array")
+                || !ordered_ids.starts_with(&[
+                    "01J00000000000000000000001",
+                    "01J00000000000000000000002",
+                    "01J00000000000000000000004",
+                    "01J0000000000000000000000A",
+                ])
                 || !ids.contains("01J00000000000000000000001")
                 || ids.contains("01J00000000000000000000003")
                 || ids.contains("01J00000000000000000000005")
@@ -5041,6 +4777,27 @@ fn modern_emission_requests() -> Vec<(&'static str, Value)> {
     ]
 }
 
+fn empty_modern_emission_requests() -> Vec<(&'static str, Value)> {
+    vec![
+        (
+            "icm_memory_recall",
+            json!({"query":"no synthetic match","project":"","limit":3}),
+        ),
+        ("icm_memory_list_topics", json!({})),
+        ("icm_memory_stats", json!({})),
+        (
+            "icm_transcript_search",
+            json!({"query":"no synthetic match","project":"eval-project","limit":10}),
+        ),
+        ("icm_transcript_stats", json!({})),
+        (
+            "icm_feedback_search",
+            json!({"query":"no synthetic match","limit":10}),
+        ),
+        ("icm_feedback_stats", json!({})),
+    ]
+}
+
 fn structured_tool_for_scenario(id: &str) -> &'static str {
     match id {
         "modern.structured-memory-list" => "icm_memory_list_topics",
@@ -5301,34 +5058,8 @@ fn prepare_provider_adversary(
                 fs::write(path, value)?;
             }
         }
-        "symlink-reparse-zero-write" => {
-            #[cfg(windows)]
-            {
-                // Windows reparse metadata is injected by the non-shippable
-                // support hook in run_provider_scope; no elevated symlink API
-                // is used by the portable evaluator.
-                let _ = (scope, paths);
-                return Ok(());
-            }
-            #[cfg(not(windows))]
-            {
-                let first = paths
-                    .first()
-                    .context("provider has no configuration document")?;
-                let target = first.with_file_name("symlink-target.fixture");
-                fs::write(&target, fs::read(first)?)?;
-                fs::remove_file(first)?;
-                create_file_symlink(&target, first)?;
-            }
-        }
         _ => {}
     }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn create_file_symlink(target: &Path, link: &Path) -> Result<()> {
-    std::os::unix::fs::symlink(target, link)?;
     Ok(())
 }
 
@@ -6093,262 +5824,6 @@ fn json_pointer_escape(value: &str) -> String {
     value.replace('~', "~0").replace('/', "~1")
 }
 
-fn resource_text(response: &Value) -> Result<&str> {
-    response
-        .pointer("/result/contents/0/text")
-        .and_then(Value::as_str)
-        .context("resource response lacks result.contents[0].text")
-}
-
-fn validate_support_event_journal(
-    bytes: &[u8],
-    required_order: &[&str],
-    artifact: Option<(&str, String)>,
-) -> Result<Vec<Value>> {
-    let text = std::str::from_utf8(bytes).context("support event journal is not UTF-8")?;
-    let events: Vec<Value> = text
-        .lines()
-        .filter(|line| !line.trim().is_empty())
-        .map(|line| serde_json::from_str(line).context("support journal line is not JSON"))
-        .collect::<Result<_>>()?;
-    if events.is_empty() {
-        anyhow::bail!("support event journal is empty");
-    }
-    let mut previous_nanos = 0_u64;
-    for (index, event) in events.iter().enumerate() {
-        if event.get("sequence").and_then(Value::as_u64) != Some((index + 1) as u64) {
-            anyhow::bail!("support event sequence is not contiguous from one");
-        }
-        let nanos = event
-            .get("monotonicNanos")
-            .and_then(Value::as_u64)
-            .context("support event lacks monotonicNanos")?;
-        if nanos < previous_nanos {
-            anyhow::bail!("support event monotonicNanos regressed");
-        }
-        previous_nanos = nanos;
-        if event.get("event").and_then(Value::as_str).is_none() {
-            anyhow::bail!("support journal event name is absent");
-        }
-    }
-    let names: Vec<_> = events
-        .iter()
-        .filter_map(|event| event.get("event").and_then(Value::as_str))
-        .collect();
-    let mut cursor = 0_usize;
-    for required in required_order {
-        let offset = names[cursor..]
-            .iter()
-            .position(|name| name == required)
-            .with_context(|| format!("support journal lacks ordered event {required}"))?;
-        cursor += offset + 1;
-    }
-    if let Some((event_name, expected_hash)) = artifact {
-        let event = events
-            .iter()
-            .find(|event| event.get("event").and_then(Value::as_str) == Some(event_name))
-            .with_context(|| format!("support journal lacks artifact event {event_name}"))?;
-        if event.get("artifactSha256").and_then(Value::as_str) != Some(expected_hash.as_str()) {
-            anyhow::bail!("support journal artifact hash differs from evaluator-read bytes");
-        }
-    }
-    Ok(events)
-}
-
-fn hash_regular_files(root: &Path) -> Result<BTreeMap<String, String>> {
-    fn visit(root: &Path, current: &Path, output: &mut BTreeMap<String, String>) -> Result<()> {
-        for entry in fs::read_dir(current)? {
-            let entry = entry?;
-            let path = entry.path();
-            let file_type = entry.file_type()?;
-            if file_type.is_dir() {
-                visit(root, &path, output)?;
-            } else if file_type.is_file() {
-                let relative = path
-                    .strip_prefix(root)
-                    .context("provider engine file escaped world")?
-                    .to_string_lossy()
-                    .replace('\\', "/");
-                output.insert(relative, sha256_file(&path)?);
-            }
-        }
-        Ok(())
-    }
-    let mut output = BTreeMap::new();
-    visit(root, root, &mut output)?;
-    Ok(output)
-}
-
-fn validate_provider_engine_case(
-    id: &str,
-    world: &Path,
-    before: &BTreeMap<String, String>,
-    after: &BTreeMap<String, String>,
-    event_bytes: &[u8],
-) -> Result<Vec<Value>> {
-    let required: &[&str] = match id {
-        "provider.engine.schema1-migration-legacy-unproven" => &[
-            "case-start",
-            "manifest-read",
-            "schema-migrated",
-            "manifest-commit",
-        ],
-        "provider.engine.newer-manifest-read-only" => &[
-            "case-start",
-            "manifest-read",
-            "newer-schema-rejected",
-            "case-stop",
-        ],
-        "provider.engine.journal-intent-before-target" => &[
-            "case-start",
-            "intent-durable",
-            "target-write",
-            "target-readback",
-            "manifest-commit",
-        ],
-        "provider.engine.target-hash-readback" => &[
-            "case-start",
-            "target-write",
-            "target-readback",
-            "manifest-commit",
-        ],
-        id if id.contains("recovery") => &[
-            "case-start",
-            "recovery-detected",
-            "semantic-compare",
-            "recovery-decision",
-            "case-stop",
-        ],
-        id if id.contains("concurrent") || id.contains("external-") => &[
-            "case-start",
-            "lock-acquired",
-            "writer-observed",
-            "lock-released",
-            "case-stop",
-        ],
-        "provider.engine.lock-loss-no-write" => &[
-            "case-start",
-            "lock-acquired",
-            "lock-lost",
-            "write-aborted",
-            "case-stop",
-        ],
-        "provider.engine.orphan-temp-owned-only" => &[
-            "case-start",
-            "orphan-scan",
-            "owned-temp-removed",
-            "case-stop",
-        ],
-        _ => anyhow::bail!("unknown provider engine case {id}"),
-    };
-    let events = validate_support_event_journal(event_bytes, required, None)?;
-    let target_a_path = world.join("target-a.json");
-    let target_b_path = world.join("target-b.json");
-    let manifest_path = world.join("install-manifest.json");
-    let target_a: Value = serde_json::from_slice(&fs::read(&target_a_path)?)?;
-    let target_b: Value = serde_json::from_slice(&fs::read(&target_b_path)?)?;
-    let manifest: Value = serde_json::from_slice(&fs::read(&manifest_path)?)?;
-    if target_a.get("sentinel").and_then(Value::as_str) != Some("target-a-unchanged")
-        || target_b.get("sentinel").and_then(Value::as_str) != Some("target-b-unchanged")
-    {
-        anyhow::bail!("provider engine removed unrelated target sentinel data");
-    }
-
-    for event in events
-        .iter()
-        .filter(|event| event.get("event").and_then(Value::as_str) == Some("target-readback"))
-    {
-        let relative = event
-            .get("path")
-            .and_then(Value::as_str)
-            .context("target-readback event lacks path")?;
-        let path = world.join(native_relative(relative));
-        let actual_hash = sha256_file(&path)?;
-        if !path.starts_with(world)
-            || event.get("artifactSha256").and_then(Value::as_str) != Some(actual_hash.as_str())
-        {
-            anyhow::bail!("target-readback event hash differs from evaluator-read target");
-        }
-    }
-
-    match id {
-        "provider.engine.schema1-migration-legacy-unproven" => {
-            if manifest.get("version").and_then(Value::as_u64) != Some(2)
-                || manifest
-                    .pointer("/providerOwnership/0/owned")
-                    .and_then(Value::as_bool)
-                    != Some(false)
-            {
-                anyhow::bail!("schema-1 migration falsely proved legacy ownership");
-            }
-        }
-        "provider.engine.newer-manifest-read-only" | "provider.engine.lock-loss-no-write" => {
-            if after != before {
-                anyhow::bail!("read-only/lock-loss provider engine case changed world files");
-            }
-        }
-        "provider.engine.recovery-overlap-conflict" | "provider.engine.external-overlap-writer" => {
-            if after.get("target-a.json") != before.get("target-a.json")
-                || !events.iter().any(|event| {
-                    event.get("event").and_then(Value::as_str) == Some("recovery-decision")
-                        || event.get("event").and_then(Value::as_str) == Some("conflict")
-                })
-            {
-                anyhow::bail!("overlap conflict did not fail closed on target bytes");
-            }
-        }
-        "provider.engine.concurrent-different-providers" => {
-            require_owned_rule(&target_a, "provider-a:icm_memory_recall", 1)?;
-            require_owned_rule(&target_b, "provider-b:icm_memory_recall", 1)?;
-        }
-        "provider.engine.concurrent-apply-strip" => {
-            require_owned_rule(&target_a, "provider-a:icm_memory_recall", 0)?;
-            if manifest
-                .pointer("/providerOwnership/0/state")
-                .and_then(Value::as_str)
-                != Some("removed")
-            {
-                anyhow::bail!("apply/strip race did not leave an ownership tombstone");
-            }
-        }
-        "provider.engine.external-disjoint-writer" | "provider.engine.recovery-disjoint-edit" => {
-            if target_a
-                .get("externalRules")
-                .and_then(Value::as_array)
-                .is_none_or(|rules| !rules.contains(&Value::String("external-disjoint".to_owned())))
-            {
-                anyhow::bail!("provider engine lost an external disjoint edit");
-            }
-        }
-        "provider.engine.orphan-temp-owned-only" => {
-            if world.join(".icm-owned-transaction.tmp").exists()
-                || fs::read(world.join("user-unowned.tmp"))? != b"unowned-temp-unchanged"
-            {
-                anyhow::bail!("orphan cleanup removed unowned temp or retained owned temp");
-            }
-        }
-        "provider.engine.concurrent-identical-apply" => {
-            require_owned_rule(&target_a, "provider-a:icm_memory_recall", 1)?;
-        }
-        _ => {}
-    }
-    Ok(events)
-}
-
-fn require_owned_rule(target: &Value, rule: &str, count: usize) -> Result<()> {
-    let actual = target
-        .get("ownedRules")
-        .and_then(Value::as_array)
-        .context("provider engine target lacks ownedRules")?
-        .iter()
-        .filter(|value| value.as_str() == Some(rule))
-        .count();
-    if actual != count {
-        anyhow::bail!("provider engine owned rule {rule:?} count {actual}, expected {count}");
-    }
-    Ok(())
-}
-
 fn validate_manifest(
     manifest: &Value,
     provider: &str,
@@ -6566,13 +6041,14 @@ fn shutdown_mock_daemon(base_url: &str) -> Result<()> {
         .next()
         .context("mock URL lacks authority")?;
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     let request = format!(
         "POST /__shutdown HTTP/1.1\r\nHost: {authority}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     );
     stream.write_all(request.as_bytes())?;
     stream.flush()?;
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response)?;
+    let response = read_bounded_to_end(&mut stream, 64 * 1024)?;
     if !response.starts_with(b"HTTP/1.1 200") {
         anyhow::bail!("mock daemon shutdown response was not HTTP 200");
     }
@@ -6590,14 +6066,15 @@ fn probe_mock_daemon(base_url: &str) -> Result<()> {
         .context("mock URL lacks authority")?;
     let body = r#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{}}"#;
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
     let request = format!(
         "POST /mcp HTTP/1.1\r\nHost: {authority}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
         body.len()
     );
     stream.write_all(request.as_bytes())?;
     stream.flush()?;
-    let mut response = Vec::new();
-    stream.read_to_end(&mut response)?;
+    let response = read_bounded_to_end(&mut stream, 64 * 1024)?;
     if !response.starts_with(b"HTTP/1.1 200") {
         anyhow::bail!("mock daemon integration probe response was not HTTP 200");
     }
@@ -6650,36 +6127,6 @@ fn poison_memory_table(db_path: &Path) -> Result<()> {
          CREATE TABLE memories (id TEXT PRIMARY KEY);",
     )?;
     Ok(())
-}
-
-fn latency_shape_matches(
-    actual: &LatencySummary,
-    thresholds: &crate::design::AcceptanceThresholds,
-) -> bool {
-    actual.block_medians_micros.len() == thresholds.latency_block_count
-        && actual.sample_count
-            == thresholds
-                .latency_block_count
-                .saturating_mul(thresholds.latency_samples_per_block)
-}
-
-fn latency_limits(
-    baseline_median: u128,
-    baseline_p95: u128,
-    thresholds: &crate::design::AcceptanceThresholds,
-) -> Result<(u128, u128)> {
-    if thresholds.latency_median_ratio_denominator == 0
-        || thresholds.latency_p95_ratio_denominator == 0
-    {
-        anyhow::bail!("latency ratio denominator must be nonzero");
-    }
-    let median = baseline_median.saturating_mul(thresholds.latency_median_ratio_numerator)
-        / thresholds.latency_median_ratio_denominator
-        + thresholds.latency_median_allowance_micros;
-    let p95 = baseline_p95.saturating_mul(thresholds.latency_p95_ratio_numerator)
-        / thresholds.latency_p95_ratio_denominator
-        + thresholds.latency_p95_allowance_micros;
-    Ok((median, p95))
 }
 
 fn retrieval_meets_thresholds(
@@ -6929,15 +6376,8 @@ mod tests {
     }
 
     #[test]
-    fn typed_metric_threshold_changes_gate_outcome() {
+    fn typed_retrieval_threshold_changes_gate_outcome() {
         let mut thresholds: crate::design::AcceptanceThresholds = serde_json::from_value(json!({
-            "legacyDeterministicParity":1.0,
-            "legacyCatalogOrderParity":1.0,
-            "legacyRequiredFieldParity":1.0,
-            "modernSchemaCoverage":1.0,
-            "modernRequiredFieldCoverage":1.0,
-            "actualStructuredEmissionsValid":1.0,
-            "boundaryPassRate":1.0,
             "resourceMaxPortableTokens":2048,
             "resourceMaxWireBytes":2048,
             "modernRecallMaxWireBytes":8192,
@@ -6947,16 +6387,6 @@ mod tests {
             "daemonCount":1,
             "daemonModelLoadCount":1,
             "unsupportedBaselineRequiresWireOrCliEvidence":true,
-            "latencyBlockCount":5,
-            "latencyWarmupsPerOperation":5,
-            "latencySamplesPerBlock":20,
-            "latencyMedianRatioNumerator":3,
-            "latencyMedianRatioDenominator":2,
-            "latencyMedianAllowanceMicros":5000,
-            "latencyP95RatioNumerator":2,
-            "latencyP95RatioDenominator":1,
-            "latencyP95AllowanceMicros":10000,
-            "latencyNoiseFloorMicros":2000,
             "retrievalK":3,
             "retrievalHitAt3Minimum":1.0,
             "retrievalRecallAt3Minimum":0.9,
@@ -6972,16 +6402,6 @@ mod tests {
         assert!(retrieval_meets_thresholds(&metrics, &thresholds));
         thresholds.retrieval_recall_at_3_minimum = 0.93;
         assert!(!retrieval_meets_thresholds(&metrics, &thresholds));
-
-        let summary = LatencySummary {
-            block_medians_micros: vec![1; 5],
-            median_micros: 1,
-            p95_micros: 1,
-            sample_count: 100,
-        };
-        assert!(latency_shape_matches(&summary, &thresholds));
-        thresholds.latency_block_count = 4;
-        assert!(!latency_shape_matches(&summary, &thresholds));
     }
 
     #[test]

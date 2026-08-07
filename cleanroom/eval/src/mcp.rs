@@ -1,6 +1,6 @@
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Command, ExitStatus, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -12,6 +12,8 @@ use serde_json::{json, Value};
 use crate::sandbox::{ScenarioSandbox, UserStatePaths};
 
 const RESPONSE_TIMEOUT: Duration = Duration::from_secs(10);
+const TERMINATE_TIMEOUT: Duration = Duration::from_secs(2);
+pub(crate) const MAX_CAPTURE_BYTES: usize = 16 * 1024 * 1024;
 pub const MODERN_PROTOCOL_VERSION: &str = "2026-07-28";
 pub const META_PROTOCOL_VERSION: &str = "io.modelcontextprotocol/protocolVersion";
 pub const META_CLIENT_CAPABILITIES: &str = "io.modelcontextprotocol/clientCapabilities";
@@ -33,8 +35,55 @@ pub struct McpClient {
     child: Child,
     stdin: Option<ChildStdin>,
     stdout_rx: Receiver<std::io::Result<String>>,
-    stderr_rx: Receiver<Vec<u8>>,
+    stderr_rx: Receiver<io::Result<Vec<u8>>>,
     pub exchanges: Vec<Exchange>,
+}
+
+pub(crate) fn read_capped_line(
+    reader: &mut impl BufRead,
+    buffer: &mut Vec<u8>,
+    limit: usize,
+) -> io::Result<Option<bool>> {
+    buffer.clear();
+    let read = reader.take(limit as u64 + 1).read_until(b'\n', buffer)?;
+    if read == 0 {
+        return Ok(None);
+    }
+    if buffer.last() != Some(&b'\n') && read == limit + 1 {
+        let mut scratch = Vec::with_capacity(64 * 1024);
+        loop {
+            scratch.clear();
+            let drained = reader.take(1024 * 1024).read_until(b'\n', &mut scratch)?;
+            if drained == 0 || scratch.last() == Some(&b'\n') {
+                break;
+            }
+        }
+        return Ok(Some(false));
+    }
+    Ok(Some(true))
+}
+
+pub(crate) fn read_bounded_to_end(mut reader: impl Read, limit: usize) -> io::Result<Vec<u8>> {
+    let mut retained = Vec::new();
+    let mut buffer = [0_u8; 16 * 1024];
+    let mut exceeded = false;
+    loop {
+        let read = reader.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(retained.len());
+        retained.extend_from_slice(&buffer[..read.min(remaining)]);
+        exceeded |= read > remaining;
+    }
+    if exceeded {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("candidate capture exceeded {limit} bytes"),
+        ))
+    } else {
+        Ok(retained)
+    }
 }
 
 impl McpClient {
@@ -92,17 +141,26 @@ impl McpClient {
             .take()
             .context("candidate stderr unavailable")?;
 
-        let (stdout_tx, stdout_rx) = mpsc::channel();
+        let (stdout_tx, stdout_rx) = mpsc::sync_channel(16);
         thread::spawn(move || {
             let mut reader = BufReader::new(stdout);
+            let mut bytes = Vec::new();
             loop {
-                let mut line = String::new();
-                match reader.read_line(&mut line) {
-                    Ok(0) => break,
-                    Ok(_) => {
-                        if stdout_tx.send(Ok(line)).is_err() {
+                match read_capped_line(&mut reader, &mut bytes, MAX_CAPTURE_BYTES) {
+                    Ok(None) => break,
+                    Ok(Some(true)) => {
+                        let line = String::from_utf8(std::mem::take(&mut bytes))
+                            .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error));
+                        if stdout_tx.send(line).is_err() {
                             break;
                         }
+                    }
+                    Ok(Some(false)) => {
+                        let _ = stdout_tx.send(Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            "candidate MCP response exceeded capture limit",
+                        )));
+                        break;
                     }
                     Err(error) => {
                         let _ = stdout_tx.send(Err(error));
@@ -114,10 +172,7 @@ impl McpClient {
 
         let (stderr_tx, stderr_rx) = mpsc::channel();
         thread::spawn(move || {
-            let mut reader = BufReader::new(stderr);
-            let mut bytes = Vec::new();
-            let _ = reader.read_to_end(&mut bytes);
-            let _ = stderr_tx.send(bytes);
+            let _ = stderr_tx.send(read_bounded_to_end(stderr, MAX_CAPTURE_BYTES));
         });
 
         Ok(Self {
@@ -163,14 +218,26 @@ impl McpClient {
     ) -> Result<Option<String>> {
         let request = format!("{raw_without_newline}\n");
         let start = Instant::now();
-        let stdin = self.stdin.as_mut().context("candidate stdin closed")?;
-        stdin.write_all(request.as_bytes())?;
-        stdin.flush()?;
+        let deadline = start + RESPONSE_TIMEOUT;
+        let mut stdin = self.stdin.take().context("candidate stdin closed")?;
+        let request_bytes = request.as_bytes().to_vec();
+        let (write_tx, write_rx) = mpsc::sync_channel(1);
+        thread::spawn(move || {
+            let result = stdin.write_all(&request_bytes).and_then(|()| stdin.flush());
+            let _ = write_tx.send((stdin, result));
+        });
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let (stdin, result) = write_rx
+            .recv_timeout(remaining)
+            .context("timed out writing MCP request")?;
+        self.stdin = Some(stdin);
+        result?;
 
         let response = if expect_response {
+            let remaining = deadline.saturating_duration_since(Instant::now());
             let line = self
                 .stdout_rx
-                .recv_timeout(RESPONSE_TIMEOUT)
+                .recv_timeout(remaining)
                 .context("timed out waiting for MCP response")??;
             Some(line)
         } else {
@@ -239,16 +306,21 @@ impl McpClient {
 
     pub fn shutdown(mut self) -> Result<ProcessCapture> {
         drop(self.stdin.take());
-        let _ = self.child.kill();
-        let status = self.child.wait().context("waiting for candidate")?;
+        let status = terminate_child(&mut self.child, TERMINATE_TIMEOUT)?
+            .context("candidate did not terminate within cleanup deadline")?;
         let stderr = self
             .stderr_rx
             .recv_timeout(Duration::from_secs(2))
-            .unwrap_or_default();
+            .context("timed out collecting candidate stderr")??;
         let mut stdout = String::new();
         loop {
             match self.stdout_rx.recv_timeout(Duration::from_millis(50)) {
-                Ok(Ok(line)) => stdout.push_str(&line),
+                Ok(Ok(line)) => {
+                    if stdout.len().saturating_add(line.len()) > MAX_CAPTURE_BYTES {
+                        anyhow::bail!("candidate stdout exceeded capture limit");
+                    }
+                    stdout.push_str(&line);
+                }
                 Ok(Err(error)) => return Err(error.into()),
                 Err(mpsc::RecvTimeoutError::Timeout | mpsc::RecvTimeoutError::Disconnected) => {
                     break;
@@ -267,8 +339,24 @@ impl McpClient {
 impl Drop for McpClient {
     fn drop(&mut self) {
         drop(self.stdin.take());
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        let _ = terminate_child(&mut self.child, TERMINATE_TIMEOUT);
+    }
+}
+
+fn terminate_child(child: &mut Child, timeout: Duration) -> io::Result<Option<ExitStatus>> {
+    if let Some(status) = child.try_wait()? {
+        return Ok(Some(status));
+    }
+    let _ = child.kill();
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if Instant::now() >= deadline {
+            return Ok(None);
+        }
+        thread::sleep(Duration::from_millis(10));
     }
 }
 

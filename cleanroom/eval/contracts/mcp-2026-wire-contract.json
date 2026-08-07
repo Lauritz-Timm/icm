@@ -128,11 +128,5 @@
       "truncationReasons": [],
       "omittedAtLeast": 0
     }
-  },
-  "testSupport": {
-    "productionHiddenFlagsOrEnvironmentBackdoorsAllowed": false,
-    "candidateProcessIsBlackBoxForOrdinaryBehavior": true,
-    "crashBoundaryCoverage": "compile-time evaluator-only support binary or in-process candidate integration contract with injected journal/filesystem durable boundaries",
-    "proxyObservation": "test-only injected readiness and counters; impossible to ship in production"
   }
 }

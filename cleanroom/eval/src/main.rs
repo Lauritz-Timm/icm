@@ -10,7 +10,7 @@ mod schema;
 
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 use evaluate::{EvaluationMode, EvaluationReport, Runner};
@@ -76,31 +76,10 @@ fn run() -> Result<()> {
                     "work-root",
                     "evidence-root",
                     "run-label",
+                    "expect",
                 ],
             )?;
             run_self_test(&options)?;
-        }
-        "archive" => {
-            reject_unknown(
-                &options,
-                &[
-                    "workspace-root",
-                    "suite-root",
-                    "evidence-root",
-                    "output-root",
-                ],
-            )?;
-            let workspace_root = required_path(&options, "workspace-root")?;
-            let suite_root = required_path(&options, "suite-root")?;
-            let evidence_root = required_path(&options, "evidence-root")?;
-            let output_root = required_path(&options, "output-root")?;
-            let manifest = archive(
-                &workspace_root,
-                &suite_root,
-                &evidence_root,
-                &output_root,
-            )?;
-            println!("{}", manifest.display());
         }
         "golden-from-report" => {
             reject_unknown(&options, &["report"])?;
@@ -120,7 +99,7 @@ fn run() -> Result<()> {
             mock_daemon::run(&required_path(&options, "record")?, mode, ipv6)?;
         }
         _ => anyhow::bail!(
-            "unknown command {command:?}; expected verify-design, record-baseline, run, self-test, archive, or golden-from-report"
+            "unknown command {command:?}; expected verify-design, record-baseline, run, self-test, or golden-from-report"
         ),
     }
     Ok(())
@@ -155,12 +134,24 @@ fn run_self_test(options: &BTreeMap<String, String>) -> Result<()> {
         .get("run-label")
         .cloned()
         .unwrap_or_else(|| "self-test".into());
+    let expectation = options
+        .get("expect")
+        .map(String::as_str)
+        .unwrap_or("baseline");
+    let mode = match expectation {
+        "baseline" => EvaluationMode::RecordBaseline,
+        "candidate" => EvaluationMode::Candidate,
+        other => {
+            anyhow::bail!("unknown self-test expectation {other:?}; expected baseline or candidate")
+        }
+    };
     let roots = [
         base_work.join("root with spaces"),
         base_work.join("røød-東京-🧪"),
     ];
     let mut normalized = Vec::new();
     let mut report_paths = Vec::new();
+    let mut status_counts = Vec::new();
     for (index, root) in roots.iter().enumerate() {
         let runner = Runner::new(
             workspace_root.clone(),
@@ -169,10 +160,17 @@ fn run_self_test(options: &BTreeMap<String, String>) -> Result<()> {
             root.clone(),
             evidence.clone(),
             format!("{label}-root-{}", index + 1),
-            EvaluationMode::RecordBaseline,
+            mode,
         )?;
         let (report, path) = runner.run()?;
+        if mode == EvaluationMode::Candidate && !report.portable_acceptance {
+            anyhow::bail!(
+                "candidate self-test root {} failed portable acceptance",
+                index + 1
+            );
+        }
         normalized.push(normalization::normalize_report(&report)?);
+        status_counts.push(report.status_counts.clone());
         report_paths.push(path);
     }
     if normalized[0] != normalized[1] {
@@ -188,7 +186,9 @@ fn run_self_test(options: &BTreeMap<String, String>) -> Result<()> {
             "{}\n",
             serde_json::to_string_pretty(&json!({
                 "equal": true,
+                "expectation": expectation,
                 "normalizedSha256": sandbox::sha256_bytes(&normalized[0]),
+                "statusCounts": status_counts,
                 "roots": ["<ROOT_WITH_SPACES>", "<ROOT_WITH_UNICODE>"],
                 "reportNames": report_paths.iter().filter_map(|path| path.file_name()).map(|name| name.to_string_lossy()).collect::<Vec<_>>()
             }))?
@@ -196,98 +196,6 @@ fn run_self_test(options: &BTreeMap<String, String>) -> Result<()> {
     )?;
     println!("{}", result_path.display());
     Ok(())
-}
-
-fn archive(
-    workspace_root: &Path,
-    suite_root: &Path,
-    evidence_root: &Path,
-    output_root: &Path,
-) -> Result<PathBuf> {
-    let user_state = sandbox::UserStatePaths::from_environment()?;
-    let workspace_root = sandbox::resolve_existing(workspace_root)?;
-    let suite_root = sandbox::resolve_existing(suite_root)?;
-    let evidence_root = sandbox::resolve_existing(evidence_root)?;
-    let output_root = sandbox::resolve_intent(output_root)?;
-    let report_source = suite_root
-        .parent()
-        .context("suite root has no cleanroom parent")?
-        .join("reports")
-        .join("evaluation-designer.md");
-    let report_source = sandbox::resolve_existing(&report_source)?;
-    sandbox::validate_archive_roots(
-        &workspace_root,
-        &suite_root,
-        &evidence_root,
-        &report_source,
-        &output_root,
-        &user_state,
-    )?;
-    let output_root = sandbox::materialize_resolved(&output_root)?;
-    let package_root = output_root.join("icm-cleanroom-evaluation");
-    if package_root.exists() {
-        anyhow::bail!("archive output already exists: {}", package_root.display());
-    }
-    let suite_destination = package_root.join("eval");
-    let evidence_destination = package_root.join("evidence");
-    copy_tree_filtered(&suite_root, &suite_destination)?;
-    let report_destination = package_root.join("report").join("evaluation-designer.md");
-    if let Some(parent) = report_destination.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::copy(&report_source, &report_destination).with_context(|| {
-        format!(
-            "copying evaluator report {} to {}",
-            report_source.display(),
-            report_destination.display()
-        )
-    })?;
-    copy_tree_filtered(&evidence_root, &evidence_destination)?;
-    let mut files = recursive_files(&package_root)?;
-    files.sort();
-    let mut lines = Vec::new();
-    for file in files {
-        let relative = file.strip_prefix(&package_root)?;
-        lines.push(format!(
-            "{}  {}",
-            sandbox::sha256_file(&file)?,
-            relative.to_string_lossy().replace('\\', "/")
-        ));
-    }
-    let manifest = package_root.join("MANIFEST.sha256");
-    fs::write(&manifest, format!("{}\n", lines.join("\n")))?;
-    Ok(manifest)
-}
-
-fn copy_tree_filtered(source: &Path, destination: &Path) -> Result<()> {
-    fs::create_dir_all(destination)?;
-    for entry in fs::read_dir(source).with_context(|| format!("reading {}", source.display()))? {
-        let entry = entry?;
-        let name = entry.file_name();
-        if name == "target" || name == ".runs" {
-            continue;
-        }
-        let target = destination.join(&name);
-        if entry.file_type()?.is_dir() {
-            copy_tree_filtered(&entry.path(), &target)?;
-        } else {
-            fs::copy(entry.path(), target)?;
-        }
-    }
-    Ok(())
-}
-
-fn recursive_files(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut output = Vec::new();
-    for entry in fs::read_dir(root)? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            output.extend(recursive_files(&entry.path())?);
-        } else {
-            output.push(entry.path());
-        }
-    }
-    Ok(output)
 }
 
 fn parse_options(arguments: Vec<String>) -> Result<BTreeMap<String, String>> {
@@ -322,31 +230,4 @@ fn required_path(options: &BTreeMap<String, String>, key: &str) -> Result<PathBu
         .get(key)
         .map(PathBuf::from)
         .with_context(|| format!("missing --{key}"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn archive_output_must_not_overlap_any_source() {
-        let workspace = std::env::temp_dir().join(format!(
-            "icm-cleanroom-archive-policy-test-{}",
-            std::process::id()
-        ));
-        let suite = workspace.join("cleanroom/eval");
-        let evidence = workspace.join("evidence");
-        let report = workspace.join("cleanroom/reports/evaluation-designer.md");
-        let output = suite.join("archive");
-        let error = sandbox::validate_archive_roots(
-            &workspace,
-            &suite,
-            &evidence,
-            &report,
-            &output,
-            &sandbox::UserStatePaths::default(),
-        )
-        .unwrap_err();
-        assert!(error.to_string().contains("overlapping roots"));
-    }
 }

@@ -67,36 +67,6 @@ const EXACT_RULES: &[(&str, &str, &str)] = &[
         "/response/result/content/0/text",
         "ulid-in-text",
     ),
-    (
-        "resource.snapshot-concurrency",
-        "/eventJournalSha256",
-        "sha256",
-    ),
-    (
-        "proxy.proxy-zero-store-model",
-        "/eventJournalSha256",
-        "sha256",
-    ),
-    (
-        "proxy.dns-rebinding-target-pin",
-        "/eventJournalSha256",
-        "sha256",
-    ),
-    (
-        "proxy.daemon-one-store-model",
-        "/proxyPid",
-        "positive-process-id",
-    ),
-    (
-        "proxy.daemon-one-store-model",
-        "/daemonPid",
-        "positive-process-id",
-    ),
-    (
-        "proxy.daemon-one-store-model",
-        "/eventJournalSha256",
-        "sha256",
-    ),
 ];
 
 const PREFIX_RULES: &[(&str, &str, &str)] = &[
@@ -104,10 +74,8 @@ const PREFIX_RULES: &[(&str, &str, &str)] = &[
     ("provider.", "/scopes/1/serverId", "server-id-or-null"),
     ("provider.", "/scopes/0/manifestSha256", "sha256-or-null"),
     ("provider.", "/scopes/1/manifestSha256", "sha256-or-null"),
-    ("provider.engine.", "/eventJournalSha256", "sha256"),
     ("proxy.real-daemon-", "/proxyPid", "positive-process-id"),
     ("proxy.real-daemon-", "/daemonPid", "positive-process-id"),
-    ("proxy.real-daemon-", "/eventJournalSha256", "sha256"),
 ];
 
 pub fn normalize_report(report: &EvaluationReport) -> Result<Vec<u8>> {

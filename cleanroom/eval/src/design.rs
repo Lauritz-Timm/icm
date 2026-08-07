@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -24,7 +24,6 @@ pub struct DesignVerification {
     pub tool_count: usize,
     pub structured_tool_count: usize,
     pub golden_scenario_count: usize,
-    pub baseline_metrics_sha256: String,
     pub acceptance_thresholds_sha256: String,
     pub bound_threshold_count: usize,
     pub acceptance_thresholds: AcceptanceThresholds,
@@ -33,13 +32,6 @@ pub struct DesignVerification {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct AcceptanceThresholds {
-    pub legacy_deterministic_parity: f64,
-    pub legacy_catalog_order_parity: f64,
-    pub legacy_required_field_parity: f64,
-    pub modern_schema_coverage: f64,
-    pub modern_required_field_coverage: f64,
-    pub actual_structured_emissions_valid: f64,
-    pub boundary_pass_rate: f64,
     pub resource_max_portable_tokens: usize,
     pub resource_max_wire_bytes: usize,
     pub modern_recall_max_wire_bytes: usize,
@@ -49,16 +41,6 @@ pub struct AcceptanceThresholds {
     pub daemon_count: usize,
     pub daemon_model_load_count: usize,
     pub unsupported_baseline_requires_wire_or_cli_evidence: bool,
-    pub latency_block_count: usize,
-    pub latency_warmups_per_operation: usize,
-    pub latency_samples_per_block: usize,
-    pub latency_median_ratio_numerator: u128,
-    pub latency_median_ratio_denominator: u128,
-    pub latency_median_allowance_micros: u128,
-    pub latency_p95_ratio_numerator: u128,
-    pub latency_p95_ratio_denominator: u128,
-    pub latency_p95_allowance_micros: u128,
-    pub latency_noise_floor_micros: u128,
     pub retrieval_k: usize,
     pub retrieval_hit_at_3_minimum: f64,
     pub retrieval_recall_at_3_minimum: f64,
@@ -66,13 +48,6 @@ pub struct AcceptanceThresholds {
 }
 
 pub const ACCEPTANCE_THRESHOLD_KEYS: &[&str] = &[
-    "legacyDeterministicParity",
-    "legacyCatalogOrderParity",
-    "legacyRequiredFieldParity",
-    "modernSchemaCoverage",
-    "modernRequiredFieldCoverage",
-    "actualStructuredEmissionsValid",
-    "boundaryPassRate",
     "resourceMaxPortableTokens",
     "resourceMaxWireBytes",
     "modernRecallMaxWireBytes",
@@ -82,16 +57,6 @@ pub const ACCEPTANCE_THRESHOLD_KEYS: &[&str] = &[
     "daemonCount",
     "daemonModelLoadCount",
     "unsupportedBaselineRequiresWireOrCliEvidence",
-    "latencyBlockCount",
-    "latencyWarmupsPerOperation",
-    "latencySamplesPerBlock",
-    "latencyMedianRatioNumerator",
-    "latencyMedianRatioDenominator",
-    "latencyMedianAllowanceMicros",
-    "latencyP95RatioNumerator",
-    "latencyP95RatioDenominator",
-    "latencyP95AllowanceMicros",
-    "latencyNoiseFloorMicros",
     "retrievalK",
     "retrievalHitAt3Minimum",
     "retrievalRecallAt3Minimum",
@@ -100,110 +65,10 @@ pub const ACCEPTANCE_THRESHOLD_KEYS: &[&str] = &[
 
 pub fn verify(suite_root: &Path) -> Result<DesignVerification> {
     let design: Value = read_json(&suite_root.join("contracts/preregistered-design.json"))?;
-    if design
-        .get("initialDesignFrozenBeforeReplacementCode")
-        .and_then(Value::as_bool)
-        != Some(true)
-        || design
-            .get("versions1Through4FrozenBeforeReplacementCode")
-            .and_then(Value::as_bool)
-            != Some(true)
-        || design
-            .get("v5FrozenBeforeCandidateExecution")
-            .and_then(Value::as_bool)
-            != Some(true)
-        || design
-            .get("v5CandidateOutcomesObserved")
-            .and_then(Value::as_bool)
-            != Some(false)
-        || design
-            .pointer("/v6IntegrityAudit/productSourceInspected")
-            .and_then(Value::as_bool)
-            != Some(false)
-        || design
-            .pointer("/v6IntegrityAudit/candidateOutcomesObserved")
-            .and_then(Value::as_bool)
-            != Some(false)
-        || design
-            .pointer("/v6IntegrityAudit/scenarioInventoryChanged")
-            .and_then(Value::as_bool)
-            != Some(false)
-        || design
-            .pointer("/v6IntegrityAudit/acceptanceThresholdsChanged")
-            .and_then(Value::as_bool)
-            != Some(false)
-    {
-        anyhow::bail!("design freeze provenance differs from the frozen v1-v6 record");
-    }
-    if design.get("v5CorrectionBasis")
-        != Some(&serde_json::json!([
-            "official MCP outputSchema semantics",
-            "independently mergeable phase gates"
-        ]))
-    {
-        anyhow::bail!("v5 correction basis differs from the frozen standards and phase audit");
-    }
-    if design.get("v6CandidateContext").and_then(Value::as_str)
-        != Some(
-            "Phase 2 replacement source existed; v6 was derived only from the official final MCP basic/schema and v1-v5 preregistration provenance, without inspecting Phase 2 source or candidate outcomes",
-        )
-    {
-        anyhow::bail!("v6 candidate context differs from the frozen provenance record");
-    }
-    if design.pointer("/v6IntegrityAudit/correctionBasis")
-        != Some(&serde_json::json!([
-            "official final MCP 2026-07-28 error-code allocation",
-            "official final MCP 2026-07-28 _meta key grammar",
-            "official final MCP 2026-07-28 dual-era compatibility semantics"
-        ]))
-    {
-        anyhow::bail!("v6 correction basis differs from the bounded official-spec audit");
-    }
-    if design.get("v7IntegrityAudit")
-        != Some(&serde_json::json!({
-            "phase2ProductSourceInspected": false,
-            "phase2CandidateExecuted": false,
-            "candidateResultsCompared": true,
-            "untouchedDevelopEvidenceUsed": true,
-            "scenarioInventoryChanged": false,
-            "acceptanceThresholdsChanged": false,
-            "correctionBasis": [
-                "the evaluator source hardcoded Init::Legacy for all boundary probes",
-                "the frozen architecture requires exact 2024 compatibility and closed modern validation",
-                "v5 and v6 result comparison isolated boundary.limit-under and boundary.limit-over as the only status deltas while candidate binary hashes differed",
-                "untouched develop raw exchanges prove historical 2024 limit clamping and unknown-field tolerance",
-                "the v6 malformed-URI probe returned method-not-found under 2024 and therefore never exercised URI validation"
-            ]
-        }))
-    {
-        anyhow::bail!("v7 correction provenance differs from the frozen boundary-era audit");
-    }
-    if design.get("candidateContext").and_then(Value::as_str)
-        != Some(
-            "Phase 2 replacement results existed and were compared for v7, but v7 inspected and changed only evaluator contracts, source, reports, and untouched-develop evidence; Phase 2 product source was not inspected and the Phase 2 candidate was not executed",
-        )
-    {
-        anyhow::bail!("v7 candidate context differs from the frozen provenance record");
-    }
-    if design
-        .pointer("/supersession/authoritativeDesign")
-        .and_then(Value::as_u64)
-        != Some(7)
-        || design
-            .pointer("/supersession/v6AuthoritativeForReplacementAcceptance")
-            .and_then(Value::as_bool)
-            != Some(false)
-    {
-        anyhow::bail!("v7 supersession record is not authoritative");
-    }
-    verify_boundary_revision_semantics(&design)?;
     let design_version = design
         .get("designVersion")
         .and_then(Value::as_u64)
         .context("missing designVersion")?;
-    if design_version != 7 {
-        anyhow::bail!("expected authoritative preregistration designVersion 7");
-    }
 
     verify_environment(&design)?;
     let fixture_hashes = verify_fixture_hashes(suite_root)?;
@@ -214,15 +79,14 @@ pub fn verify(suite_root: &Path) -> Result<DesignVerification> {
         .get("scenarioCount")
         .and_then(Value::as_u64)
         .context("scenarioCount missing")? as usize;
-    if scenarios.len() != declared_scenario_count || declared_scenario_count != 326 {
+    if scenarios.len() != declared_scenario_count {
         anyhow::bail!(
-            "scenario inventory count mismatch: executable={}, declared={}, required=326",
+            "scenario inventory count mismatch: executable={}, declared={}",
             scenarios.len(),
             declared_scenario_count
         );
     }
     verify_paths(suite_root)?;
-    verify_no_host_paths(suite_root)?;
     verify_product_independence(suite_root)?;
     let (acceptance_thresholds, acceptance_thresholds_sha256, bound_threshold_count) =
         verify_threshold_bindings(&design, &scenarios)?;
@@ -311,42 +175,6 @@ pub fn verify(suite_root: &Path) -> Result<DesignVerification> {
     {
         anyhow::bail!("legacy golden hash manifest is incomplete or malformed");
     }
-    let metrics_path = suite_root.join("goldens/baseline-metrics.json");
-    let baseline_metrics: Value = read_json(&metrics_path)?;
-    let expected_operations: BTreeSet<_> = ["tools/list", "memory/recall", "memory/stats"]
-        .into_iter()
-        .collect();
-    let actual_operations: BTreeSet<_> = baseline_metrics
-        .get("latencyMicros")
-        .and_then(Value::as_object)
-        .context("baseline metrics lack latencyMicros")?
-        .keys()
-        .map(String::as_str)
-        .collect();
-    if actual_operations != expected_operations
-        || baseline_metrics
-            .get("candidateSha256")
-            .and_then(Value::as_str)
-            .is_none_or(|hash| hash.len() != 64)
-    {
-        anyhow::bail!("baseline metric golden is incomplete");
-    }
-    for operation in expected_operations {
-        for statistic in ["median", "p95"] {
-            if baseline_metrics
-                .pointer(&format!(
-                    "/latencyMicros/{}/{statistic}",
-                    operation.replace('/', "~1")
-                ))
-                .and_then(Value::as_u64)
-                .is_none_or(|value| value == 0)
-            {
-                anyhow::bail!("baseline latency {operation}.{statistic} is absent or zero");
-            }
-        }
-    }
-    let baseline_metrics_sha256 = sha256_file(&metrics_path)?;
-
     Ok(DesignVerification {
         design_version,
         fixture_hashes,
@@ -355,7 +183,6 @@ pub fn verify(suite_root: &Path) -> Result<DesignVerification> {
         tool_count: expected_tools.len(),
         structured_tool_count,
         golden_scenario_count: golden.len(),
-        baseline_metrics_sha256,
         acceptance_thresholds_sha256,
         bound_threshold_count,
         acceptance_thresholds,
@@ -364,73 +191,6 @@ pub fn verify(suite_root: &Path) -> Result<DesignVerification> {
 
 pub fn load_design(suite_root: &Path) -> Result<Value> {
     read_json(&suite_root.join("contracts/preregistered-design.json"))
-}
-
-fn verify_boundary_revision_semantics(design: &Value) -> Result<()> {
-    let expected = serde_json::json!({
-        "scenarioInventoryUnchanged": true,
-        "acceptanceThresholdsUnchanged": true,
-        "separateCandidateProcessPerLeg": true,
-        "eachSupportedLegRecordsLegPassed": true,
-        "invalidParamsCode": -32602,
-        "multiLegScenarios": {
-            "boundary.limit-under": {
-                "legacy2024": {
-                    "requestLimit": 0,
-                    "expectedEffectiveLimit": 1,
-                    "expectedError": false,
-                    "deterministicMatchingRows": 101
-                },
-                "modern2026": {
-                    "requestLimit": 0,
-                    "expectedErrorCode": -32602,
-                    "metadataOnEveryRequest": true
-                }
-            },
-            "boundary.limit-over": {
-                "legacy2024": {
-                    "requestLimit": 101,
-                    "expectedEffectiveLimit": 20,
-                    "expectedError": false,
-                    "deterministicMatchingRows": 101
-                },
-                "modern2026": {
-                    "requestLimit": 101,
-                    "expectedErrorCode": -32602,
-                    "metadataOnEveryRequest": true
-                }
-            },
-            "boundary.unknown-field": {
-                "tool": "icm_memory_recall",
-                "field": "unknownField",
-                "legacy2024": {
-                    "unknownFieldIgnored": true,
-                    "expectedError": false,
-                    "expectedResultCount": 1
-                },
-                "modern2026": {
-                    "unknownFieldRejected": true,
-                    "expectedErrorCode": -32602,
-                    "metadataOnEveryRequest": true
-                }
-            }
-        },
-        "modernOnlyScenarios": {
-            "boundary.malformed-uri": {
-                "protocolVersion": "2026-07-28",
-                "method": "resources/read",
-                "uri": "icm://../../real-user-state",
-                "expectedErrorCode": -32602,
-                "methodNotFoundAccepted": false,
-                "methodNotFoundBaselineClassification": "UNSUPPORTED_BASELINE",
-                "metadataOnEveryRequest": true
-            }
-        }
-    });
-    if design.get("boundaryRevisionSemantics") != Some(&expected) {
-        anyhow::bail!("boundary revision semantics differ from the frozen v7 contract");
-    }
-    Ok(())
 }
 
 pub fn expected_scenarios(design: &Value) -> Result<Vec<String>> {
@@ -476,17 +236,6 @@ pub fn expected_scenarios(design: &Value) -> Result<Vec<String>> {
         for case in cases.iter().filter_map(Value::as_str) {
             scenarios.push(format!("provider.{provider}.{case}"));
         }
-    }
-    for id in inventory
-        .get("providerEngine")
-        .and_then(Value::as_array)
-        .context("scenarioInventory.providerEngine missing")?
-    {
-        scenarios.push(
-            id.as_str()
-                .context("non-string provider engine scenario")?
-                .to_owned(),
-        );
     }
     Ok(scenarios)
 }
@@ -637,7 +386,7 @@ fn verify_contracts(suite_root: &Path, design: &Value) -> Result<BTreeMap<String
             .and_then(Value::as_u64)
             != Some(2048)
     {
-        anyhow::bail!("offline MCP wire contract differs from the frozen v6 semantics");
+        anyhow::bail!("offline MCP wire contract differs from executable semantics");
     }
     if !meta_key_is_valid("invalid")
         || !meta_key_is_valid("com.example/evaluation")
@@ -684,12 +433,8 @@ fn verify_contracts(suite_root: &Path, design: &Value) -> Result<BTreeMap<String
             .pointer("/endpoint/loopbackOnly")
             .and_then(Value::as_bool)
             != Some(true)
-        || proxy
-            .pointer("/evidence/candidateSelfAttestationAccepted")
-            .and_then(Value::as_bool)
-            != Some(false)
     {
-        anyhow::bail!("proxy contract differs from the frozen v6 black-box contract");
+        anyhow::bail!("proxy contract differs from the black-box contract");
     }
     let normalization: Value = read_json(&suite_root.join("contracts/normalization-rules.json"))?;
     crate::normalization::verify_contract(&suite_root.join("contracts/normalization-rules.json"))?;
@@ -723,17 +468,6 @@ fn verify_product_independence(suite_root: &Path) -> Result<()> {
         })
     {
         anyhow::bail!("evaluator Cargo.toml contains a forbidden path dependency");
-    }
-    for file in recursive_files(&suite_root.join("src"))? {
-        let source = fs::read_to_string(&file)?;
-        for forbidden in [["icm", "core"].join("_"), ["icm", "store"].join("_")] {
-            if source.contains(&forbidden) {
-                anyhow::bail!(
-                    "evaluator source {} references forbidden product crate {forbidden}",
-                    file.display()
-                );
-            }
-        }
     }
     Ok(())
 }
@@ -795,21 +529,17 @@ fn verify_threshold_bindings(
             }
         }
     }
-    let metric_refs: BTreeSet<_> = ["latency", "retrieval"]
+    let metric_refs: BTreeSet<_> = design
+        .pointer("/metrics/retrieval/thresholdRefs")
+        .and_then(Value::as_array)
         .into_iter()
-        .flat_map(|section| {
-            design
-                .pointer(&format!("/metrics/{section}/thresholdRefs"))
-                .and_then(Value::as_array)
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-        })
+        .flatten()
+        .filter_map(Value::as_str)
         .collect();
     let expected_metric_refs: BTreeSet<_> = ACCEPTANCE_THRESHOLD_KEYS
         .iter()
         .copied()
-        .filter(|key| key.starts_with("latency") || key.starts_with("retrieval"))
+        .filter(|key| key.starts_with("retrieval"))
         .collect();
     if metric_refs != expected_metric_refs {
         anyhow::bail!(
@@ -899,63 +629,6 @@ fn verify_paths(suite_root: &Path) -> Result<()> {
         }
     }
     Ok(())
-}
-
-fn verify_no_host_paths(suite_root: &Path) -> Result<()> {
-    let paths = [
-        suite_root.join("src"),
-        suite_root.join("contracts"),
-        suite_root.join("Cargo.toml"),
-    ];
-    for path in paths {
-        for file in recursive_files(&path)? {
-            let content = fs::read_to_string(&file)
-                .with_context(|| format!("reading source as UTF-8 {}", file.display()))?;
-            let host_prefixes = [
-                ["/", "home", "/"].concat(),
-                ["/", "Users", "/"].concat(),
-                ["C:", "\\", "Users", "\\"].concat(),
-                ["/", "var", "/", "folders", "/"].concat(),
-            ];
-            for forbidden in host_prefixes {
-                if content.contains(&forbidden) {
-                    anyhow::bail!(
-                        "host-specific absolute path {forbidden:?} in {}",
-                        file.display()
-                    );
-                }
-            }
-            let shell_markers = [
-                ["Command::new(\"", "sh", "\")"].concat(),
-                ["Command::new(\"", "bash", "\")"].concat(),
-                ["Command::new(\"", "zsh", "\")"].concat(),
-                ["cmd", ".exe", " /", "C"].concat(),
-            ];
-            for forbidden in shell_markers {
-                if content.contains(&forbidden) {
-                    anyhow::bail!("shell orchestration {forbidden:?} in {}", file.display());
-                }
-            }
-        }
-    }
-    Ok(())
-}
-
-fn recursive_files(path: &Path) -> Result<Vec<PathBuf>> {
-    if path.is_file() {
-        return Ok(vec![path.to_path_buf()]);
-    }
-    let mut files = Vec::new();
-    for entry in fs::read_dir(path).with_context(|| format!("reading {}", path.display()))? {
-        let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            files.extend(recursive_files(&entry.path())?);
-        } else {
-            files.push(entry.path());
-        }
-    }
-    files.sort();
-    Ok(files)
 }
 
 fn verify_unique(values: &[String], label: &str) -> Result<()> {

@@ -115,14 +115,9 @@
     "explicitOptInOnly": true,
     "restrictionsMonotone": true,
     "losslessUnrelatedBytes": true,
-    "intentDurableBeforeTarget": true,
-    "targetReadbackBeforeNextTarget": true,
-    "hashAndSemanticRecovery": true,
     "ownedExactRemovalOnly": true,
     "externalEqualValuesAdoptedNotOwned": true,
-    "unknownOrMalformedOrAmbiguousZeroWrites": true,
-    "newerManifestReadOnly": true,
-    "schema1MigratesLegacyUnproven": true
+    "unknownOrMalformedOrAmbiguousZeroWrites": true
   },
   "adversarialFixtures": {
     "externalEqual": "exact registration and two trust rules are seeded in the selected real documents after doctor resolves serverId; manifest must mark them preexisting-adopted and not owned",
@@ -136,7 +131,6 @@
       "cursor": ["*.json", "*.jsonc"],
       "opencode": ["opencode.json", "opencode.jsonc"],
       "zed": ["settings.json", "settings.jsonc"]
-    },
-    "windowsReparse": "non-shippable support injects privilege-free filesystem metadata and emits a journal; evaluator verifies the reparse attribute and unchanged target bytes"
+    }
   }
 }

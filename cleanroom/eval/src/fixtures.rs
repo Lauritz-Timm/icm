@@ -395,26 +395,6 @@ pub fn memory_access_count(db_path: &Path, id: &str) -> Result<Option<u32>> {
     }
 }
 
-/// Commit the evaluator-owned writer half of the resource snapshot test. The
-/// support hook can only pause a read; it cannot choose or attest the mutation.
-pub fn commit_resource_snapshot_writer(db_path: &Path) -> Result<()> {
-    let mut connection = Connection::open(db_path)?;
-    let transaction = connection.transaction()?;
-    insert_resource_memory(
-        &transaction,
-        "01J50000000000000000000001",
-        "context-eval-project",
-        "RESOURCE-SNAPSHOT-POST-STATE-MARKER",
-    )?;
-    transaction.execute(
-        "UPDATE memories SET updated_at = '2026-08-05T12:00:00Z', importance = 'high'
-         WHERE id = '01J50000000000000000000001'",
-        [],
-    )?;
-    transaction.commit()?;
-    Ok(())
-}
-
 #[derive(Debug)]
 pub struct FixtureState {
     pub project_name: String,

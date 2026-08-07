@@ -2,7 +2,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
-use std::net::SocketAddr;
+use std::io::ErrorKind;
+use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 
@@ -42,7 +43,11 @@ pub const REQUIRED_ENV: &[&str] = &[
     "PATHEXT",
 ];
 
-#[derive(Debug, Clone)]
+const MAX_SCENARIO_FILES: usize = 4_096;
+const MAX_SCENARIO_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_SCENARIO_TOTAL_BYTES: u64 = 64 * 1024 * 1024;
+
+#[derive(Debug)]
 pub struct ScenarioSandbox {
     pub root: PathBuf,
     pub home: PathBuf,
@@ -54,6 +59,7 @@ pub struct ScenarioSandbox {
     pub canary_path: PathBuf,
     pub canary_secret: String,
     pub canary_hash: String,
+    deny_proxy: TcpListener,
 }
 
 #[derive(Clone)]
@@ -329,15 +335,9 @@ impl ScenarioSandbox {
         environment.insert(OsString::from("TZ"), OsString::from("UTC"));
         environment.insert(OsString::from("LANG"), OsString::from("C.UTF-8"));
         environment.insert(OsString::from("LC_ALL"), OsString::from("C.UTF-8"));
-        environment.insert(
-            OsString::from("NO_PROXY"),
-            OsString::from("127.0.0.1,localhost,::1"),
-        );
-        environment.insert(
-            OsString::from("no_proxy"),
-            OsString::from("127.0.0.1,localhost,::1"),
-        );
-        let blocked_proxy = OsString::from("http://127.0.0.1:9");
+        let deny_proxy = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        deny_proxy.set_nonblocking(true)?;
+        let blocked_proxy = OsString::from(format!("http://{}", deny_proxy.local_addr()?));
         environment.insert(OsString::from("HTTP_PROXY"), blocked_proxy.clone());
         environment.insert(OsString::from("HTTPS_PROXY"), blocked_proxy.clone());
         environment.insert(OsString::from("ALL_PROXY"), blocked_proxy);
@@ -362,6 +362,7 @@ impl ScenarioSandbox {
             canary_path,
             canary_secret,
             canary_hash,
+            deny_proxy,
         };
         canary_registry()
             .lock()
@@ -401,6 +402,7 @@ impl ScenarioSandbox {
         if !unexpected.is_empty() {
             anyhow::bail!("environment contains non-allowlisted keys: {unexpected:?}");
         }
+        self.verify_deny_proxy_unused()?;
         Ok(())
     }
 
@@ -416,6 +418,7 @@ impl ScenarioSandbox {
     }
 
     pub fn verify_loopback_configuration(&self) -> Result<()> {
+        let expected = self.deny_proxy.local_addr()?;
         for key in ["HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY"] {
             let value = self
                 .environment
@@ -423,27 +426,22 @@ impl ScenarioSandbox {
                 .with_context(|| format!("missing configured {key}"))?
                 .to_string_lossy();
             let address = parse_http_socket_address(&value)?;
-            if !address.ip().is_loopback() {
-                anyhow::bail!("configured {key} is not loopback: {value}");
+            if address != expected {
+                anyhow::bail!("configured {key} is not the evaluator-owned deny proxy: {value}");
             }
         }
-        for key in ["NO_PROXY", "no_proxy"] {
-            let value = self
-                .environment
-                .get(std::ffi::OsStr::new(key))
-                .with_context(|| format!("missing configured {key}"))?
-                .to_string_lossy();
-            for token in value
-                .split(',')
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                if !matches!(token, "127.0.0.1" | "localhost" | "::1") {
-                    anyhow::bail!("configured {key} contains non-loopback exemption: {token}");
-                }
-            }
-        }
+        self.verify_deny_proxy_unused()?;
         Ok(())
+    }
+
+    fn verify_deny_proxy_unused(&self) -> Result<()> {
+        match self.deny_proxy.accept() {
+            Err(error) if error.kind() == ErrorKind::WouldBlock => Ok(()),
+            Err(error) => Err(error).context("checking evaluator-owned deny proxy"),
+            Ok((_, peer)) => {
+                anyhow::bail!("candidate used ambient proxy settings from loopback peer {peer}")
+            }
+        }
     }
 
     pub fn verify_child_context(
@@ -560,43 +558,33 @@ pub fn materialize_resolved(path: &Path) -> Result<PathBuf> {
 pub fn validate_runner_roots(
     workspace: &Path,
     suite: &Path,
+    candidate: &Path,
     work: &Path,
     evidence: &Path,
     user_state: &UserStatePaths,
 ) -> Result<()> {
     user_state.validate_workspace(workspace)?;
+    reject_git_workspace(workspace)?;
     for (label, root) in [("suite", suite), ("work", work), ("evidence", evidence)] {
         validate_workspace_child(workspace, root, label, user_state)?;
     }
+    validate_workspace_child(workspace, candidate, "candidate", user_state)?;
     reject_overlap(suite, "suite", work, "work")?;
     reject_overlap(suite, "suite", evidence, "evidence")?;
     reject_overlap(work, "work", evidence, "evidence")?;
+    reject_overlap(candidate, "candidate", suite, "suite")?;
+    reject_overlap(candidate, "candidate", work, "work")?;
+    reject_overlap(candidate, "candidate", evidence, "evidence")?;
     Ok(())
 }
 
-pub fn validate_archive_roots(
-    workspace: &Path,
-    suite: &Path,
-    evidence: &Path,
-    report: &Path,
-    output: &Path,
-    user_state: &UserStatePaths,
-) -> Result<()> {
-    user_state.validate_workspace(workspace)?;
-    for (label, root) in [
-        ("suite source", suite),
-        ("evidence source", evidence),
-        ("report source", report),
-        ("archive output", output),
-    ] {
-        validate_workspace_child(workspace, root, label, user_state)?;
+fn reject_git_workspace(workspace: &Path) -> Result<()> {
+    if workspace.join(".git").try_exists()? {
+        anyhow::bail!(
+            "workspace must not be a Git worktree: {} contains .git",
+            workspace.display()
+        );
     }
-    reject_overlap(suite, "suite source", evidence, "evidence source")?;
-    reject_overlap(suite, "suite source", report, "report source")?;
-    reject_overlap(evidence, "evidence source", report, "report source")?;
-    reject_overlap(suite, "suite source", output, "archive output")?;
-    reject_overlap(evidence, "evidence source", output, "archive output")?;
-    reject_overlap(report, "report source", output, "archive output")?;
     Ok(())
 }
 
@@ -664,6 +652,17 @@ fn parse_http_socket_address(value: &str) -> Result<SocketAddr> {
 }
 
 fn scan_tree_for_secret(root: &Path, secret: &[u8]) -> Result<()> {
+    let mut files = 0_usize;
+    let mut bytes = 0_u64;
+    scan_tree_for_secret_bounded(root, secret, &mut files, &mut bytes)
+}
+
+fn scan_tree_for_secret_bounded(
+    root: &Path,
+    secret: &[u8],
+    files: &mut usize,
+    bytes: &mut u64,
+) -> Result<()> {
     for entry in
         fs::read_dir(root).with_context(|| format!("scanning artifacts {}", root.display()))?
     {
@@ -676,8 +675,21 @@ fn scan_tree_for_secret(root: &Path, secret: &[u8]) -> Result<()> {
             );
         }
         if metadata.is_dir() {
-            scan_tree_for_secret(&entry.path(), secret)?;
+            scan_tree_for_secret_bounded(&entry.path(), secret, files, bytes)?;
         } else if metadata.is_file() {
+            *files += 1;
+            *bytes = bytes.saturating_add(metadata.len());
+            if *files > MAX_SCENARIO_FILES
+                || metadata.len() > MAX_SCENARIO_FILE_BYTES
+                || *bytes > MAX_SCENARIO_TOTAL_BYTES
+            {
+                anyhow::bail!(
+                    "candidate artifact tree exceeded evaluator scan bounds: files={}, bytes={}, file={} bytes",
+                    *files,
+                    *bytes,
+                    metadata.len()
+                );
+            }
             let bytes = fs::read(entry.path())?;
             if bytes.windows(secret.len()).any(|window| window == secret) {
                 anyhow::bail!(
@@ -818,7 +830,15 @@ mod tests {
             fs::create_dir_all(path).unwrap();
         }
         let state = UserStatePaths::synthetic(vec![home], vec![]);
-        validate_runner_roots(&workspace, &suite, &work, &evidence, &state).unwrap();
+        validate_runner_roots(
+            &workspace,
+            &suite,
+            &workspace.join("candidate"),
+            &work,
+            &evidence,
+            &state,
+        )
+        .unwrap();
     }
 
     #[test]
@@ -833,6 +853,7 @@ mod tests {
         let home_error = validate_runner_roots(
             &home,
             &home.join("suite"),
+            &home.join("candidate"),
             &home.join("work"),
             &home.join("evidence"),
             &state,
@@ -843,6 +864,7 @@ mod tests {
         let state_error = validate_runner_roots(
             &workspace,
             &workspace.join("suite"),
+            &workspace.join("candidate"),
             &state_dir.join("work"),
             &workspace.join("evidence"),
             &state,
@@ -861,6 +883,7 @@ mod tests {
         let error = validate_runner_roots(
             &workspace,
             &workspace.join("suite"),
+            &workspace.join("candidate"),
             &workspace.join("work"),
             &workspace.join("evidence"),
             &state,
@@ -878,12 +901,31 @@ mod tests {
         let error = validate_runner_roots(
             &workspace,
             &workspace.join("suite"),
+            &workspace.join("candidate"),
             &workspace.join("work"),
             &workspace.join("work/evidence"),
             &state,
         )
         .unwrap_err();
         assert!(error.to_string().contains("overlapping roots"));
+    }
+
+    #[test]
+    fn git_workspace_is_rejected() {
+        let root = TestRoot::new();
+        let workspace = root.0.join("workspace");
+        fs::create_dir_all(workspace.join(".git")).unwrap();
+        let state = UserStatePaths::synthetic(vec![], vec![]);
+        let error = validate_runner_roots(
+            &workspace,
+            &workspace.join("suite"),
+            &workspace.join("candidate"),
+            &workspace.join("work"),
+            &workspace.join("evidence"),
+            &state,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("Git worktree"));
     }
 
     #[test]

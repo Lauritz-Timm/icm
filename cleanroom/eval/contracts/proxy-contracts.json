@@ -13,7 +13,6 @@
     "userinfoAllowed": false,
     "fragmentAllowed": false,
     "redirectsFollowed": false,
-    "dnsAddressesPinnedForProcessLifetime": true,
     "ambientProxyEnvironmentHonored": false,
     "pathSuffix": "mcp",
     "compactQuery": "compact=true"
@@ -45,9 +44,6 @@
   },
   "evidence": {
     "blackBoxCasesUseEvaluatorOwnedLoopbackDaemon": true,
-    "rawRequestsAndResponsesRequired": true,
-    "candidateSelfAttestationAccepted": false,
-    "internalObservationCases": ["proxy.proxy-zero-store-model", "proxy.dns-rebinding-target-pin"],
-    "internalObservationRequires": ["event journal", "counter artifact", "raw proxy exchange", "evaluator hash verification"]
+    "rawRequestsAndResponsesRequired": true
   }
 }

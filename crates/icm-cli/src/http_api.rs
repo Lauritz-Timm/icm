@@ -57,23 +57,14 @@ use icm_mcp::{
 };
 use icm_store::Store;
 
+#[cfg(test)]
+use crate::mcp_http::encode_working_directory;
 use crate::mcp_http::WORKING_DIRECTORY_HEADER;
 use crate::recall_format::{self, RecallFormat};
 
 const MAX_MCP_REQUEST_BYTES: usize = 2 * 1024 * 1024;
 const MAX_MCP_SESSIONS: usize = 1024;
 static NEXT_MCP_SESSION_ID: AtomicU64 = AtomicU64::new(1);
-
-#[cfg(test)]
-fn encode_working_directory(directory: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(directory.len() * 2);
-    for byte in directory.bytes() {
-        encoded.push(HEX[(byte >> 4) as usize] as char);
-        encoded.push(HEX[(byte & 0x0f) as usize] as char);
-    }
-    encoded
-}
 
 // ---------------------------------------------------------------------------
 // Shared state

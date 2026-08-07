@@ -1,6 +1,10 @@
 {
-  "contractVersion": 1,
-  "accessedAt": "2026-08-05",
+  "contractVersion": 2,
+  "accessedAt": "2026-08-07",
+  "sources": [
+    "https://opencode.ai/v2/docs/mcp-servers",
+    "https://opencode.ai/v2/docs/permissions"
+  ],
   "trustedTools": ["icm_memory_recall", "icm_memory_store"],
   "serverId": {
     "installationScoped": true,
@@ -67,7 +71,10 @@
       "projectPath": "opencode.json",
       "userPath": "$XDG_CONFIG_HOME/opencode/opencode.json",
       "registration": "mcp.servers.<S>",
+      "localRegistration": {"type": "local", "command": ["<icm-executable>", "serve"]},
+      "permissionsKey": "permissions",
       "v2Trust": {"action": "<normalized-S>_<tool>", "resource": "*", "effect": "allow"},
+      "wildcardGrammar": "* matches zero or more characters; ? matches exactly one character",
       "lastMatchingRuleWins": true,
       "legacyDialectSeparate": true,
       "mixedDialectReadOnly": true

@@ -145,7 +145,7 @@
               "root": "project",
               "format": "json",
               "relativePath": "opencode.json",
-              "initial": "{\"sentinel\":{\"keep\":\"opencode-project-unchanged\"},\"mcp\":{\"servers\":{\"existing\":{\"command\":\"existing-command\"}}},\"permission\":[{\"action\":\"existing_*\",\"resource\":\"*\",\"effect\":\"ask\"},{\"action\":\"dangerous_*\",\"resource\":\"*\",\"effect\":\"deny\"}]}"
+              "initial": "{\"sentinel\":{\"keep\":\"opencode-project-unchanged\"},\"mcp\":{\"servers\":{\"existing\":{\"type\":\"local\",\"command\":[\"existing-command\"]}}},\"permissions\":[{\"action\":\"existing_*\",\"resource\":\"*\",\"effect\":\"ask\"},{\"action\":\"dangerous_*\",\"resource\":\"*\",\"effect\":\"deny\"}]}"
             }
           ]
         },
@@ -159,7 +159,7 @@
               "root": "opencode-user-config",
               "format": "json",
               "relativePath": "opencode.json",
-              "initial": "{\"sentinel\":{\"keep\":\"opencode-user-unchanged\"},\"mcp\":{\"servers\":{\"existing\":{\"command\":\"existing-command\"}}},\"permission\":[{\"action\":\"existing_*\",\"resource\":\"*\",\"effect\":\"ask\"},{\"action\":\"dangerous_*\",\"resource\":\"*\",\"effect\":\"deny\"}]}"
+              "initial": "{\"sentinel\":{\"keep\":\"opencode-user-unchanged\"},\"mcp\":{\"servers\":{\"existing\":{\"type\":\"local\",\"command\":[\"existing-command\"]}}},\"permissions\":[{\"action\":\"existing_*\",\"resource\":\"*\",\"effect\":\"ask\"},{\"action\":\"dangerous_*\",\"resource\":\"*\",\"effect\":\"deny\"}]}"
             }
           ]
         }

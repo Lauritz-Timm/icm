@@ -1271,6 +1271,7 @@ impl Runner {
                         provider,
                         scope,
                         &sandbox,
+                        &self.candidate,
                         server_id.as_deref().expect("server id assigned above"),
                         &document_paths,
                         fixture,
@@ -5115,6 +5116,7 @@ fn seed_dynamic_provider_adversary(
     provider: &ProviderCase,
     scope: &ProviderScopeFixture,
     sandbox: &ScenarioSandbox,
+    candidate: &Path,
     server_id: &str,
     document_paths: &[PathBuf],
     fixture: &ProviderFixture,
@@ -5125,6 +5127,7 @@ fn seed_dynamic_provider_adversary(
                 &provider.id,
                 scope,
                 document_paths,
+                candidate,
                 &[server_id],
                 &fixture.owned_tools,
                 true,
@@ -5136,6 +5139,7 @@ fn seed_dynamic_provider_adversary(
                 &provider.id,
                 scope,
                 document_paths,
+                candidate,
                 &["icm-a", "icm_a"],
                 &fixture.owned_tools,
                 true,
@@ -5159,6 +5163,7 @@ fn seed_dynamic_provider_adversary(
                 &provider.id,
                 alternate,
                 &alternate_paths,
+                candidate,
                 &[server_id],
                 &fixture.owned_tools,
                 true,
@@ -5188,6 +5193,7 @@ fn seed_dynamic_provider_adversary(
                 &provider.id,
                 scope,
                 document_paths,
+                candidate,
                 &[server_id],
                 &fixture.owned_tools,
                 true,
@@ -5196,6 +5202,7 @@ fn seed_dynamic_provider_adversary(
                 &provider.id,
                 scope,
                 &alternate_paths,
+                candidate,
                 &[server_id],
                 &fixture.owned_tools,
                 true,
@@ -5210,6 +5217,7 @@ fn seed_provider_values(
     provider: &str,
     scope: &ProviderScopeFixture,
     paths: &[PathBuf],
+    candidate: &Path,
     server_ids: &[&str],
     tools: &[String],
     include_permissions: bool,
@@ -5222,14 +5230,12 @@ fn seed_provider_values(
             }
             let mut output = text;
             for server_id in server_ids {
-                output.push_str(&format!(
-                    "\n[mcp_servers.{server_id}]\ncommand = \"external-icm-command\"\nenabled_tools = [{}]\n",
-                    tools
-                        .iter()
-                        .map(|tool| format!("\"{tool}\""))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                ));
+                let registration = toml::to_string(&json!({
+                    "command": candidate.to_string_lossy(),
+                    "args": ["serve"],
+                    "enabled_tools": tools
+                }))?;
+                output.push_str(&format!("\n[mcp_servers.{server_id}]\n{registration}"));
                 if include_permissions {
                     for tool in tools {
                         output.push_str(&format!(
@@ -5257,7 +5263,7 @@ fn seed_provider_values(
                             .context("mcpServers is not an object")?
                             .insert(
                                 (*server_id).to_owned(),
-                                json!({"command":"external-icm-command"}),
+                                json!({"command":candidate.to_string_lossy(),"args":["serve"]}),
                             );
                     }
                     "opencode" => {
@@ -5272,7 +5278,7 @@ fn seed_provider_values(
                             .context("OpenCode mcp.servers is not an object")?
                             .insert(
                                 (*server_id).to_owned(),
-                                json!({"command":"external-icm-command"}),
+                                json!({"type":"local","command":[candidate.to_string_lossy(),"serve"]}),
                             );
                     }
                     "zed" => {
@@ -5283,7 +5289,7 @@ fn seed_provider_values(
                             .context("Zed context_servers is not an object")?
                             .insert(
                                 (*server_id).to_owned(),
-                                json!({"command":"external-icm-command"}),
+                                json!({"command":candidate.to_string_lossy(),"args":["serve"]}),
                             );
                     }
                     other => anyhow::bail!("unknown JSON provider {other}"),
@@ -5316,15 +5322,15 @@ fn seed_provider_values(
                     }
                 }
                 "opencode" => {
-                    let permission = object
-                        .entry("permission")
+                    let permissions = object
+                        .entry("permissions")
                         .or_insert_with(|| json!([]))
                         .as_array_mut()
-                        .context("OpenCode permission is not an array")?;
+                        .context("OpenCode permissions is not an array")?;
                     for server_id in server_ids {
                         let normalized = server_id.replace('-', "_");
                         for tool in tools {
-                            permission.push(json!({
+                            permissions.push(json!({
                                 "action":format!("{normalized}_{tool}"),
                                 "resource":"*",
                                 "effect":"allow"
@@ -5723,6 +5729,26 @@ fn validate_provider_registration(
     if registration.is_none_or(Value::is_null) {
         anyhow::bail!("provider registration is absent from exact registration surface");
     }
+    if provider == "opencode" {
+        let registration = registration
+            .and_then(Value::as_object)
+            .context("OpenCode registration is not an object")?;
+        let command = registration
+            .get("command")
+            .and_then(Value::as_array)
+            .context("OpenCode local registration command is not an array")?;
+        if registration.get("type").and_then(Value::as_str) != Some("local")
+            || command.len() != 2
+            || command
+                .first()
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+            || command.get(1).and_then(Value::as_str) != Some("serve")
+            || registration.contains_key("args")
+        {
+            anyhow::bail!("OpenCode registration is not the exact local command-array shape");
+        }
+    }
     Ok(())
 }
 
@@ -5804,20 +5830,34 @@ fn validate_provider_permissions(
         }
         "opencode" => {
             let rules = parsed
-                .get("permission")
+                .get("permissions")
                 .and_then(Value::as_array)
-                .context("OpenCode v2 permission list absent")?;
+                .context("OpenCode v2 permissions list absent")?;
             if rules.iter().any(|rule| {
-                rule.get("action").and_then(Value::as_str) == Some("*")
+                rule.get("action")
+                    .and_then(Value::as_str)
+                    .is_some_and(|action| action.contains('*'))
                     && rule.get("effect").and_then(Value::as_str) == Some("allow")
             }) {
-                anyhow::bail!("OpenCode permission contains a wildcard allow action");
+                anyhow::bail!("OpenCode permissions contain a wildcard allow action");
             }
             let normalized_server = server_id.replace('-', "_");
             for tool in tools {
-                let expected = json!({"action":format!("{normalized_server}_{tool}"),"resource":"*","effect":"allow"});
-                if !rules.contains(&expected) {
-                    anyhow::bail!("OpenCode exact v2 allow rule absent");
+                let action = format!("{normalized_server}_{tool}");
+                let exact = json!({"action":action,"resource":"*","effect":"allow"});
+                let effective = rules.iter().rev().find(|rule| {
+                    rule.get("action")
+                        .and_then(Value::as_str)
+                        .is_some_and(|pattern| wildcard_matches(pattern, &action))
+                        && rule.get("resource").and_then(Value::as_str) == Some("*")
+                });
+                if !rules.contains(&exact)
+                    || effective
+                        .and_then(|rule| rule.get("effect"))
+                        .and_then(Value::as_str)
+                        != Some("allow")
+                {
+                    anyhow::bail!("OpenCode exact v2 allow rule is absent or shadowed");
                 }
             }
             if !rules.contains(&json!({"action":"dangerous_*","resource":"*","effect":"deny"})) {
@@ -5846,6 +5886,32 @@ fn validate_provider_permissions(
         other => anyhow::bail!("unknown provider {other}"),
     }
     Ok(())
+}
+
+fn wildcard_matches(pattern: &str, value: &str) -> bool {
+    let pattern: Vec<_> = pattern.chars().collect();
+    let value: Vec<_> = value.chars().collect();
+    let (mut pattern_at, mut value_at, mut star, mut retry_at) = (0, 0, None, 0);
+    while value_at < value.len() {
+        if pattern
+            .get(pattern_at)
+            .is_some_and(|token| *token == '?' || *token == value[value_at])
+        {
+            pattern_at += 1;
+            value_at += 1;
+        } else if pattern.get(pattern_at) == Some(&'*') {
+            star = Some(pattern_at);
+            pattern_at += 1;
+            retry_at = value_at;
+        } else if let Some(star_at) = star {
+            pattern_at = star_at + 1;
+            retry_at += 1;
+            value_at = retry_at;
+        } else {
+            return false;
+        }
+    }
+    pattern[pattern_at..].iter().all(|token| *token == '*')
 }
 
 fn json_pointer_escape(value: &str) -> String {
@@ -6257,6 +6323,86 @@ mod tests {
             native_relative("a/b\\c"),
             PathBuf::from("a").join("b").join("c")
         );
+    }
+
+    #[test]
+    fn opencode_wildcards_match_actions_without_matching_neighbors() {
+        assert!(wildcard_matches("icm*_recall", "icm123_recall"));
+        assert!(wildcard_matches("*", "icm123_store"));
+        assert!(wildcard_matches("icm?_store", "icm1_store"));
+        assert!(!wildcard_matches("icm?_store", "icm12_store"));
+        assert!(!wildcard_matches("icm*_recall", "other_recall"));
+    }
+
+    #[test]
+    fn dynamic_provider_seeds_use_canonical_candidate_launches() {
+        let root = std::env::temp_dir().join(format!(
+            "icm-provider-registration-fixture-{}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let candidate = root.join("candidate with spaces");
+        let tools = vec![
+            "icm_memory_recall".to_owned(),
+            "icm_memory_store".to_owned(),
+        ];
+
+        for provider in ["codex", "claude-code", "cursor", "opencode", "zed"] {
+            let format = if provider == "codex" { "toml" } else { "json" };
+            let path = root.join(format!("{provider}.{format}"));
+            fs::write(&path, if format == "toml" { "" } else { "{}" }).unwrap();
+            let scope = ProviderScopeFixture {
+                scope: "project-local".to_owned(),
+                dialect: "test".to_owned(),
+                surface: "combined-registration-and-permission".to_owned(),
+                documents: vec![ProviderDocumentFixture {
+                    role: "registration-and-permission".to_owned(),
+                    root: "project".to_owned(),
+                    format: format.to_owned(),
+                    relative_path: path.to_string_lossy().into_owned(),
+                    initial: String::new(),
+                }],
+            };
+            seed_provider_values(
+                provider,
+                &scope,
+                std::slice::from_ref(&path),
+                &candidate,
+                &["icm123"],
+                &tools,
+                true,
+            )
+            .unwrap();
+
+            if provider == "codex" {
+                let value: toml::Value = fs::read_to_string(&path).unwrap().parse().unwrap();
+                assert_eq!(
+                    value["mcp_servers"]["icm123"]["command"].as_str(),
+                    candidate.to_str()
+                );
+                assert_eq!(
+                    value["mcp_servers"]["icm123"]["args"][0].as_str(),
+                    Some("serve")
+                );
+                continue;
+            }
+            let value: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+            let registration = match provider {
+                "claude-code" | "cursor" => &value["mcpServers"]["icm123"],
+                "opencode" => &value["mcp"]["servers"]["icm123"],
+                "zed" => &value["context_servers"]["icm123"],
+                _ => unreachable!(),
+            };
+            if provider == "opencode" {
+                assert_eq!(registration["type"], "local");
+                assert_eq!(registration["command"][0].as_str(), candidate.to_str());
+                assert_eq!(registration["command"][1], "serve");
+            } else {
+                assert_eq!(registration["command"].as_str(), candidate.to_str());
+                assert_eq!(registration["args"][0], "serve");
+            }
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

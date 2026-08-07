@@ -14,6 +14,7 @@ use crate::catalog::{
     DispatchResult, ToolAnnotations, ToolCatalog, ToolContext, ToolRequirements, ToolSpec,
 };
 use crate::inputs::*;
+use crate::outputs::*;
 use crate::protocol::ToolResult;
 
 /// Historical default threshold for auto-consolidation. The live value comes
@@ -1089,7 +1090,10 @@ pub fn call_tool_with_config(
         args,
         crate::catalog::InputValidation::Legacy2024Unchecked,
     ) {
-        DispatchResult::ToolResult(result) => result,
+        DispatchResult::ToolResult(mut result) => {
+            result.select_projection(false);
+            result
+        }
         DispatchResult::UnknownTool => ToolResult::error(format!("unknown tool: {name}")),
         DispatchResult::InvalidInput(_) => {
             unreachable!("unchecked legacy compatibility dispatch cannot reject typed inputs")
@@ -1493,15 +1497,11 @@ fn format_memory_output(memories: &[(Memory, f32)], compact: bool) -> String {
                 // full for every hit floods the client LLM's context (audit
                 // finding). Cap the recall view — the full excerpt stays in
                 // the store.
-                const MAX_RAW_IN_RECALL: usize = 2048;
-                if raw.len() > MAX_RAW_IN_RECALL {
-                    let mut cut = MAX_RAW_IN_RECALL;
-                    while !raw.is_char_boundary(cut) {
-                        cut -= 1;
-                    }
+                let (excerpt, truncated) = truncate_recall_raw(raw);
+                if truncated {
                     output.push_str(&format!(
                         "  raw: {}… [truncated, {} bytes total]\n",
-                        &raw[..cut],
+                        excerpt,
                         raw.len()
                     ));
                 } else {
@@ -1512,6 +1512,43 @@ fn format_memory_output(memories: &[(Memory, f32)], compact: bool) -> String {
         }
     }
     output
+}
+
+fn recall_result(
+    query: &str,
+    project: Option<&str>,
+    search_mode: SearchMode,
+    memories: &[(Memory, f32)],
+    compact: bool,
+    include_scores: bool,
+) -> ToolResult {
+    let legacy = if memories.is_empty() {
+        MSG_NO_MEMORIES.into()
+    } else {
+        format_memory_output(memories, compact)
+    };
+    let output = MemoryRecallOutput::new(query, project, search_mode, memories, include_scores);
+    ToolResult::structured(legacy, format!("Found {} memories.", output.len()), &output)
+}
+
+fn update_recall_access(store: &Store, memories: &mut [(Memory, f32)]) {
+    let refreshed = {
+        let ids: Vec<&str> = memories
+            .iter()
+            .map(|(memory, _)| memory.id.as_str())
+            .collect();
+        match store.batch_update_access(&ids) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => store.get_many(&ids),
+        }
+    };
+    if let Ok(mut refreshed) = refreshed {
+        for (memory, _) in memories {
+            if let Some(current) = refreshed.remove(&memory.id) {
+                *memory = current;
+            }
+        }
+    }
 }
 
 fn tool_recall(context: &ToolContext<'_>, args: &Value) -> ToolResult {
@@ -1608,25 +1645,29 @@ fn tool_recall(context: &ToolContext<'_>, args: &Value) -> ToolResult {
                 expanded.truncate(limit);
 
                 // Batch update access counts (includes expanded neighbors)
-                let ids: Vec<&str> = expanded.iter().map(|(m, _)| m.id.as_str()).collect();
-                let _ = store.batch_update_access(&ids);
+                update_recall_access(store, &mut expanded);
 
-                if expanded.is_empty() {
-                    return ToolResult::text(MSG_NO_MEMORIES.into());
-                }
-
-                return ToolResult::text(format_memory_output(&expanded, compact));
+                return recall_result(
+                    query,
+                    project.as_deref(),
+                    SearchMode::Hybrid,
+                    &expanded,
+                    compact,
+                    true,
+                );
             }
         }
     }
 
     // Fallback: FTS then keywords
+    let mut search_mode = SearchMode::FullText;
     let mut results = match store.search_fts(query, query_limit) {
         Ok(r) => r,
         Err(e) => return ToolResult::error(format!("search error: {e}")),
     };
 
     if results.is_empty() {
+        search_mode = SearchMode::Keyword;
         let keywords: Vec<&str> = query.split_whitespace().collect();
         results = match store.search_by_keywords(&keywords, query_limit) {
             Ok(r) => r,
@@ -1664,17 +1705,19 @@ fn tool_recall(context: &ToolContext<'_>, args: &Value) -> ToolResult {
     }
 
     // Batch update access counts (includes expanded neighbors)
-    let ids: Vec<&str> = expanded.iter().map(|(m, _)| m.id.as_str()).collect();
-    let _ = store.batch_update_access(&ids);
-
-    if expanded.is_empty() {
-        return ToolResult::text(MSG_NO_MEMORIES.into());
-    }
+    update_recall_access(store, &mut expanded);
 
     // FTS-path results have synthetic scores — reset to -1.0 for display
     // so we don't claim a hybrid-search confidence we didn't compute.
     let for_display: Vec<(Memory, f32)> = expanded.into_iter().map(|(m, _)| (m, -1.0)).collect();
-    ToolResult::text(format_memory_output(&for_display, compact))
+    recall_result(
+        query,
+        project.as_deref(),
+        search_mode,
+        &for_display,
+        compact,
+        false,
+    )
 }
 
 fn tool_forget(store: &Store, args: &Value) -> ToolResult {
@@ -1789,8 +1832,13 @@ fn tool_consolidate(store: &Store, embedder: Option<&dyn Embedder>, args: &Value
 fn tool_list_topics(store: &Store) -> ToolResult {
     match store.list_topics() {
         Ok(topics) => {
+            let structured = MemoryTopicsOutput::new(&topics);
             if topics.is_empty() {
-                return ToolResult::text("No topics yet.".into());
+                return ToolResult::structured(
+                    "No topics yet.".into(),
+                    "Found 0 topics.".into(),
+                    &structured,
+                );
             }
 
             // Group topics by scope prefix (before ':')
@@ -1825,7 +1873,11 @@ fn tool_list_topics(store: &Store) -> ToolResult {
                 }
             }
 
-            ToolResult::text(output)
+            ToolResult::structured(
+                output,
+                format!("Found {} topics.", structured.len()),
+                &structured,
+            )
         }
         Err(e) => ToolResult::error(format!("failed to list topics: {e}")),
     }
@@ -1834,6 +1886,7 @@ fn tool_list_topics(store: &Store) -> ToolResult {
 fn tool_stats(store: &Store) -> ToolResult {
     match store.stats() {
         Ok(stats) => {
+            let structured = MemoryStatsOutput::from(stats.clone());
             let mut output = format!(
                 "Memories: {}\nTopics: {}\nAvg weight: {:.3}\n",
                 stats.total_memories, stats.total_topics, stats.avg_weight
@@ -1850,7 +1903,7 @@ fn tool_stats(store: &Store) -> ToolResult {
                     format_local(&newest, "%Y-%m-%d %H:%M")
                 ));
             }
-            ToolResult::text(output)
+            ToolResult::structured(output, "Returned memory statistics.".into(), &structured)
         }
         Err(e) => ToolResult::error(format!("failed to get stats: {e}")),
     }
@@ -3358,6 +3411,7 @@ mod tests {
         let result = call_tool(&store, None, "icm_memory_stats", &json!({}), false);
         assert!(!result.is_error);
         assert!(result.content[0].text.contains("Memories: 0"));
+        assert!(result.structured_content.is_none());
     }
 
     #[test]

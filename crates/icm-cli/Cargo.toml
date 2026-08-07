@@ -61,6 +61,7 @@ icm-core = { path = "../icm-core" }
 icm-store = { path = "../icm-store", default-features = false }
 icm-mcp = { path = "../icm-mcp", default-features = false }
 anyhow = { workspace = true }
+base64 = "0.22"
 clap = { workspace = true }
 chrono = { workspace = true }
 directories = { workspace = true }

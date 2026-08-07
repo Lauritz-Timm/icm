@@ -378,6 +378,7 @@ impl OpenSearchStore {
                     "last_accessed": {"type": "date"},
                     "access_count": {"type": "integer"},
                     "weight": {"type": "float"},
+                    "memory_id": {"type": "keyword"},
                     "topic": {"type": "text", "fields": {"keyword": {"type": "keyword", "ignore_above": 1024}}},
                     "summary": {"type": "text"},
                     "raw_excerpt": {"type": "text"},
@@ -393,6 +394,25 @@ impl OpenSearchStore {
                         "method": {"name": "hnsw", "space_type": "cosinesimil", "engine": "lucene"}
                     }
                 }}
+            }),
+        )?;
+        self.request(
+            "PUT",
+            &format!("{IDX_MEMORIES}/_mapping"),
+            Some(json!({"properties": {"memory_id": {"type": "keyword"}}})),
+            false,
+        )?;
+        self.post(
+            &format!(
+                "{IDX_MEMORIES}/_update_by_query?conflicts=proceed&{}",
+                self.refresh_param()
+            ),
+            json!({
+                "query": {"bool": {"must_not": {"exists": {"field": "memory_id"}}}},
+                "script": {
+                    "lang": "painless",
+                    "source": "ctx._source.memory_id = ctx._id"
+                }
             }),
         )?;
         self.create_index(IDX_METADATA, json!({"mappings": {"properties": {"value": {"type": "double"}, "text_value": {"type": "keyword"}}}}))?;
@@ -473,6 +493,7 @@ impl OpenSearchStore {
 
     fn memory_to_source(memory: &Memory) -> Value {
         let mut doc = json!({
+            "memory_id": memory.id,
             "created_at": memory.created_at.to_rfc3339(),
             "updated_at": memory.updated_at.to_rfc3339(),
             "last_accessed": memory.last_accessed.to_rfc3339(),
@@ -1654,6 +1675,29 @@ impl OpenSearchStore {
             }
         }
         Ok(out)
+    }
+
+    /// Fetch a bounded, deterministic merge of exact topics in one query.
+    pub fn get_by_topics_limited(&self, topics: &[&str], limit: usize) -> IcmResult<Vec<Memory>> {
+        if topics.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let response = self.post(
+            &format!("{IDX_MEMORIES}/_search"),
+            json!({
+                "size": limit,
+                "query": {"terms": {"topic.keyword": topics}},
+                "sort": [{"weight": "desc"}, {"memory_id": "asc"}]
+            }),
+        )?;
+        let mut memories = Self::hits_to_memories(&response);
+        memories.sort_by(|left, right| {
+            right
+                .weight
+                .total_cmp(&left.weight)
+                .then_with(|| left.id.cmp(&right.id))
+        });
+        Ok(memories)
     }
 
     pub fn get_by_topic_prefix(&self, topic: &str) -> IcmResult<Vec<Memory>> {

@@ -4285,6 +4285,33 @@ impl SqliteStore {
         Ok(out)
     }
 
+    /// Fetch a bounded, deterministic merge of exact topics in one query.
+    pub fn get_by_topics_limited(&self, topics: &[&str], limit: usize) -> IcmResult<Vec<Memory>> {
+        if topics.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let topic_slots: Vec<String> = (1..=topics.len())
+            .map(|index| format!("?{index}"))
+            .collect();
+        let limit_slot = topics.len() + 1;
+        let sql = format!(
+            "SELECT {SELECT_COLS} FROM memories WHERE topic IN ({}) \
+             ORDER BY weight DESC, id ASC LIMIT ?{limit_slot}",
+            topic_slots.join(", ")
+        );
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut parameters: Vec<&dyn rusqlite::types::ToSql> = topics
+            .iter()
+            .map(|topic| topic as &dyn rusqlite::types::ToSql)
+            .collect();
+        parameters.push(&limit);
+        let mut statement = self.conn.prepare(&sql).map_err(db_err)?;
+        let rows = statement
+            .query_map(parameters.as_slice(), row_to_memory)
+            .map_err(db_err)?;
+        collect_rows(rows)
+    }
+
     /// Get memories by topic prefix (e.g., "wshm" matches "wshm:owner/repo").
     ///
     /// If `topic` ends with `*`, uses LIKE matching. Otherwise exact match.
@@ -7829,6 +7856,34 @@ mod tests {
             .get_many(&[id1.as_str(), id1.as_str(), id1.as_str()])
             .unwrap();
         assert_eq!(got.len(), 1);
+    }
+
+    #[test]
+    fn test_get_by_topics_limited_is_exact_bounded_and_deterministic() {
+        let store = test_store();
+        for (id, topic, weight) in [
+            ("01A", "wanted-a", 0.9),
+            ("01B", "wanted-b", 0.9),
+            ("01C", "wanted-a", 0.8),
+            ("01D", "wanted-a-extra", 1.0),
+        ] {
+            let mut memory = make_memory(topic, &format!("summary {id}"));
+            memory.id = id.into();
+            memory.weight = weight;
+            store.store(memory).unwrap();
+        }
+
+        let memories = store
+            .get_by_topics_limited(&["wanted-a", "wanted-b"], 2)
+            .unwrap();
+        assert_eq!(
+            memories
+                .iter()
+                .map(|memory| memory.id.as_str())
+                .collect::<Vec<_>>(),
+            ["01A", "01B"]
+        );
+        assert!(store.get_by_topics_limited(&[], 2).unwrap().is_empty());
     }
 
     // ── LRU cache invalidation ────────────────────────────────────────────

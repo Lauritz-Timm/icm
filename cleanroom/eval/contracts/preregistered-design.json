@@ -1,6 +1,14 @@
 {
-  "designVersion": 8,
+  "designVersion": 9,
   "scenarioCount": 294,
+  "provenance": {
+    "initialDesignFrozenAt": "2026-08-05",
+    "initialDesignFrozenBeforeReplacementImplementation": true,
+    "laterRevisionsArePostImplementationAuditSpecCorrections": true,
+    "version9FrozenBeforeFinalCandidateRun": true,
+    "scenarioInventoryAndThresholdsUnchanged": true,
+    "version9Revision": "Provider/OpenCode and HTTP session/Origin audit/spec corrections."
+  },
   "officialSources": {
     "accessedAt": "2026-08-05",
     "runtimeNetworkRequired": false,

@@ -2,9 +2,14 @@
 
 This package is a standalone, evaluation-first harness for the MCP improvement
 program. It does not modify product code and it does not inspect user state.
-The committed preregistration is the contract; the runner invokes a real ICM
+The committed design is the contract; the runner invokes a real ICM
 binary and records real wire responses, synthetic-tree mutations, configured
 loopback HTTP integration traffic, and process topology.
+
+The initial design was frozen on 2026-08-05 before replacement implementation.
+Later revisions, including v9, are post-implementation audit/spec corrections;
+v9 was frozen before the final candidate run. Its provider/OpenCode and HTTP
+session/Origin corrections did not change the 294 scenarios or thresholds.
 
 The required lane provides portable controlled-input isolation:
 

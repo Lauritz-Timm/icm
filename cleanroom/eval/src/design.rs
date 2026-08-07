@@ -69,8 +69,19 @@ pub fn verify(suite_root: &Path) -> Result<DesignVerification> {
         .get("designVersion")
         .and_then(Value::as_u64)
         .context("missing designVersion")?;
-    if design_version != 8 {
-        anyhow::bail!("expected preregistration designVersion 8");
+    if design_version != 9 {
+        anyhow::bail!("expected preregistration designVersion 9");
+    }
+    let expected_provenance = serde_json::json!({
+        "initialDesignFrozenAt": "2026-08-05",
+        "initialDesignFrozenBeforeReplacementImplementation": true,
+        "laterRevisionsArePostImplementationAuditSpecCorrections": true,
+        "version9FrozenBeforeFinalCandidateRun": true,
+        "scenarioInventoryAndThresholdsUnchanged": true,
+        "version9Revision": "Provider/OpenCode and HTTP session/Origin audit/spec corrections."
+    });
+    if design.get("provenance") != Some(&expected_provenance) {
+        anyhow::bail!("design provenance differs from the frozen v9 audit record");
     }
 
     verify_environment(&design)?;

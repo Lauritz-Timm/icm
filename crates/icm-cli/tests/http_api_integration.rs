@@ -20,7 +20,7 @@
 //!     (which the issue's manual smoke covers).
 #![cfg(all(target_os = "linux", feature = "http-api"))]
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -261,6 +261,22 @@ fn bearer_token_required_when_configured() {
 }
 
 #[test]
+fn mcp_rejects_invalid_origin_before_authentication() {
+    let (_dir, db) = temp_db();
+    let server = spawn_server(&db, &["--token", "s3cr3t"]);
+
+    let response = ureq::post(&format!("http://{}/mcp", server.addr))
+        .timeout(Duration::from_secs(5))
+        .set("origin", "https://attacker.invalid")
+        .set("content-type", "application/json")
+        .send_string(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
+    match response {
+        Err(ureq::Error::Status(code, _)) => assert_eq!(code, 403),
+        other => panic!("expected 403, got {other:?}"),
+    }
+}
+
+#[test]
 fn missing_required_fields_return_400() {
     let (_dir, db) = temp_db();
     let server = spawn_server(&db, &[]);
@@ -276,4 +292,49 @@ fn missing_required_fields_return_400() {
         }
         other => panic!("expected error, got {other:?}"),
     }
+}
+
+#[test]
+fn proxy_forwards_real_tool_call_and_structured_http_error() {
+    let (dir, db) = temp_db();
+    let server = spawn_server(&db, &[]);
+    let mut proxy = Command::new(ICM)
+        .arg("proxy")
+        .arg("--url")
+        .arg(format!("http://{}", server.addr))
+        .current_dir(dir.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn icm proxy");
+    let mut stdin = proxy.stdin.take().unwrap();
+    let mut stdout = BufReader::new(proxy.stdout.take().unwrap());
+
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"icm_memory_stats","arguments":{{}},"_meta":{{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{{}},"io.modelcontextprotocol/clientInfo":{{"name":"integration","version":"1"}}}}}}}}"#
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["id"], 1);
+    assert!(response.get("result").is_some(), "{response}");
+
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"arguments":{{}},"_meta":{{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{{}},"io.modelcontextprotocol/clientInfo":{{"name":"integration","version":"1"}}}}}}}}"#
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["id"], 2);
+    assert_eq!(response["error"]["code"], -32020);
+
+    drop(stdin);
+    assert!(proxy.wait().unwrap().success());
 }

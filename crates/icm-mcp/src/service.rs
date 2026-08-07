@@ -86,6 +86,21 @@ impl Default for ConnectionState {
     }
 }
 
+impl ConnectionState {
+    /// Start a stateless HTTP request in the frozen 2024 compatibility era.
+    /// Stdio still begins uninitialized; only transports that already carry
+    /// the protocol revision out-of-band should use this constructor.
+    pub fn legacy_2024_ready() -> Self {
+        Self {
+            phase: ConnectionPhase::LegacyReady {
+                revision: ProtocolRevision::V2024_11_05,
+                initialized_seen: false,
+            },
+            calls_since_store: 0,
+        }
+    }
+}
+
 pub struct McpService<'a> {
     store: &'a Store,
     embedder: Option<&'a dyn Embedder>,
@@ -838,15 +853,7 @@ fn validate_modern_request(
         ));
     };
     if requested != ProtocolRevision::V2026_07_28.as_str() {
-        return Err(Box::new(JsonRpcResponse::err_with_data(
-            id,
-            -32022,
-            format!("unsupported protocol version: {requested}"),
-            Some(json!({
-                "supported": SUPPORTED_PROTOCOL_VERSIONS,
-                "requested": requested,
-            })),
-        )));
+        return Err(Box::new(unsupported_protocol_version_error(id, requested)));
     }
 
     let Some(capabilities) = metadata
@@ -870,6 +877,19 @@ fn validate_modern_request(
         ));
     }
     validate_optional_metadata_values(&id, metadata)
+}
+
+/// Build the protocol-defined error shared by MCP services and transports.
+pub fn unsupported_protocol_version_error(id: Value, requested: &str) -> JsonRpcResponse {
+    JsonRpcResponse::err_with_data(
+        id,
+        -32022,
+        format!("unsupported protocol version: {requested}"),
+        Some(json!({
+            "supported": SUPPORTED_PROTOCOL_VERSIONS,
+            "requested": requested,
+        })),
+    )
 }
 
 fn validate_modern_notification(message: &JsonRpcMessage) -> Result<(), String> {

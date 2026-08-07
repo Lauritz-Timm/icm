@@ -7,4 +7,3 @@
     {"style": "windows", "base": "D:\\测试", "relative": ".codex\\config.toml", "expected": "D:\\测试\\.codex\\config.toml"}
   ]
 }
-

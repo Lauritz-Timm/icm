@@ -1,7 +1,7 @@
 # Clean-room evaluation design and untouched baseline
 
-Date: 2026-08-05  
-Source: upstream `develop` at `e2acd39fd9b77619b6ed9f0ee47828c04f9dfb40`  
+Date: 2026-08-05
+Source: upstream `develop` at `e2acd39fd9b77619b6ed9f0ee47828c04f9dfb40`
 Product changes: none
 
 ## Outcome

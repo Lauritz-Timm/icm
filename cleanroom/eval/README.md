@@ -10,6 +10,9 @@ The initial design was frozen on 2026-08-05 before replacement implementation.
 Later revisions, including v9, are post-implementation audit/spec corrections;
 v9 was frozen before the final candidate run. Its provider/OpenCode and HTTP
 session/Origin corrections did not change the 294 scenarios or thresholds.
+The pre-implementation upstream observation remains frozen in
+`goldens/baseline-metrics.json`, including its source commit and candidate
+binary hash.
 
 The required lane provides portable controlled-input isolation:
 

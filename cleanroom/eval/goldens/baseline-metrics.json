@@ -1,0 +1,15 @@
+{
+  "candidateSha256": "8ec3c43899f6f899c230165026945b224ad9926f41ae6d618c6d473ad032e684",
+  "sourceCommit": "e2acd39fd9b77619b6ed9f0ee47828c04f9dfb40",
+  "latencyMicros": {
+    "tools/list": {"median": 1443, "p95": 1629},
+    "memory/recall": {"median": 1369, "p95": 1565},
+    "memory/stats": {"median": 101, "p95": 131}
+  },
+  "payloadWireBytes": {
+    "tools/list": 13922,
+    "memory/recall": 331,
+    "memory/stats": 170
+  },
+  "retrieval": {"hitAt3": 1.0, "recallAt3": 1.0, "ndcgAt3": 1.0}
+}

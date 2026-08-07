@@ -4,11 +4,13 @@
 //! The ordered registration vector is the only order source, and the lookup
 //! map points back into that same vector.
 
+use std::any::TypeId;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use icm_core::Embedder;
 use icm_store::Store;
+use schemars::JsonSchema;
 use serde::de::DeserializeOwned;
 use serde_json::{json, Value};
 
@@ -144,6 +146,8 @@ pub struct ToolSpec {
     description: &'static str,
     legacy_input_schema: Value,
     modern_input_schema: Value,
+    modern_output_schema: Option<Value>,
+    modern_output_type: Option<TypeId>,
     legacy_input_normalizer: Option<InputNormalizer>,
     annotations: ToolAnnotations,
     requirements: ToolRequirements,
@@ -171,12 +175,25 @@ impl ToolSpec {
             description,
             legacy_input_schema,
             modern_input_schema,
+            modern_output_schema: None,
+            modern_output_type: None,
             legacy_input_normalizer,
             annotations,
             requirements,
             validate_input: deserialize_input::<I>,
             handler,
         }
+    }
+
+    pub(crate) fn with_output<O>(mut self) -> Self
+    where
+        O: JsonSchema + 'static,
+    {
+        self.modern_output_schema = Some(generated_output_schema::<O>());
+        self.requirements.structured_output_from_revision =
+            Some(ProtocolRevision::V2025_06_18);
+        self.modern_output_type = Some(TypeId::of::<O>());
+        self
     }
 
     fn legacy_definition(&self) -> Value {
@@ -188,7 +205,7 @@ impl ToolSpec {
     }
 
     fn modern_definition(&self) -> Value {
-        json!({
+        let mut definition = json!({
             "name": self.name,
             "description": self.description,
             "inputSchema": self.modern_input_schema,
@@ -196,7 +213,14 @@ impl ToolSpec {
             "_meta": {
                 "com.github.rtk-ai.icm/requirements": self.requirements.as_value(),
             },
-        })
+        });
+        if let Some(output_schema) = &self.modern_output_schema {
+            definition
+                .as_object_mut()
+                .expect("tool definitions have object roots")
+                .insert("outputSchema".into(), output_schema.clone());
+        }
+        definition
     }
 
     fn validate_modern_input(&self, arguments: &Value) -> Result<(), String> {
@@ -269,6 +293,72 @@ where
     I::refine_schema(&mut generated);
 
     generated
+}
+
+fn generated_output_schema<O>() -> Value
+where
+    O: JsonSchema,
+{
+    let mut settings = schemars::generate::SchemaSettings::draft2020_12().for_serialize();
+    settings.meta_schema = None;
+    let schema = settings.into_generator().into_root_schema_for::<O>();
+    let mut value = serde_json::to_value(schema).expect("generated output schema must serialize");
+    normalize_output_schema(&mut value);
+    value
+}
+
+fn normalize_output_schema(value: &mut Value) {
+    let Value::Object(object) = value else {
+        if let Value::Array(values) = value {
+            values.iter_mut().for_each(normalize_output_schema);
+        }
+        return;
+    };
+
+    object.remove("title");
+    if object.get("format").and_then(Value::as_str) != Some("date-time") {
+        object.remove("format");
+    }
+    object.values_mut().for_each(normalize_output_schema);
+
+    if object.contains_key("const") {
+        object.remove("type");
+    }
+
+    if let Some(Value::Array(types)) = object.get("type") {
+        let non_null: Vec<_> = types
+            .iter()
+            .filter(|value| value.as_str() != Some("null"))
+            .cloned()
+            .collect();
+        if non_null.len() == 1 && non_null.len() + 1 == types.len() {
+            let Some(non_null_type) = non_null.into_iter().next() else {
+                return;
+            };
+            let mut non_null_schema = std::mem::take(object);
+            non_null_schema.insert("type".into(), non_null_type);
+            if let Some(Value::Array(values)) = non_null_schema.get_mut("enum") {
+                values.retain(|value| !value.is_null());
+            }
+            object.insert("oneOf".into(), json!([non_null_schema, { "type": "null" }]));
+            return;
+        }
+    }
+
+    let nullable_any_of = object
+        .get("anyOf")
+        .and_then(Value::as_array)
+        .is_some_and(|variants| {
+            variants.len() == 2
+                && variants
+                    .iter()
+                    .any(|variant| variant.get("type").and_then(Value::as_str) == Some("null"))
+        });
+    if nullable_any_of {
+        if let Some(variants) = object.remove("anyOf") {
+            object.insert("oneOf".into(), variants);
+        }
+    }
 }
 
 fn validate_schema_constraints(
@@ -456,7 +546,17 @@ impl ToolCatalog {
                 return DispatchResult::InvalidInput(message);
             }
         }
-        DispatchResult::ToolResult((registration.handler)(context, dispatch_arguments))
+        let result = (registration.handler)(context, dispatch_arguments);
+        if validation == InputValidation::Modern
+            && !result.is_error
+            && result.structured_content_type() != registration.modern_output_type
+        {
+            return DispatchResult::ToolResult(ToolResult::error(format!(
+                "tool {} emitted output that does not match its advertised schema",
+                registration.name
+            )));
+        }
+        DispatchResult::ToolResult(result)
     }
 }
 
@@ -588,6 +688,20 @@ mod tests {
         ),
     ];
 
+    const STRUCTURED_TOOLS: [&str; 11] = [
+        "icm_memory_recall",
+        "icm_memory_list_topics",
+        "icm_memory_stats",
+        "icm_feedback_record",
+        "icm_feedback_search",
+        "icm_feedback_stats",
+        "icm_transcript_start_session",
+        "icm_transcript_record",
+        "icm_transcript_search",
+        "icm_transcript_show",
+        "icm_transcript_stats",
+    ];
+
     #[test]
     fn annotation_projection_has_all_four_explicit_fields() {
         let value = ToolAnnotations::new(true, false, true, false).as_value();
@@ -616,6 +730,11 @@ mod tests {
 
         let with_embedder = crate::tools::build_catalog(true);
         let with_projection = with_embedder.legacy_list();
+        assert!(with_projection["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|tool| tool.get("outputSchema").is_none()));
         assert_eq!(
             with_projection["tools"]
                 .as_array()
@@ -662,7 +781,7 @@ mod tests {
     }
 
     #[test]
-    fn modern_projection_has_exact_annotations_and_phase_two_schema_shape() {
+    fn modern_projection_has_exact_annotations_and_typed_output_schemas() {
         let catalog = crate::tools::build_catalog(true);
         let projection = catalog.modern_list();
         let tools = projection["tools"].as_array().unwrap();
@@ -678,13 +797,18 @@ mod tests {
             assert!(tool
                 .pointer("/inputSchema/required")
                 .is_some_and(Value::is_array));
-            assert!(tool.get("outputSchema").is_none());
-
             let requirements = &tool["_meta"]["com.github.rtk-ai.icm/requirements"];
             assert_eq!(requirements["minimumProtocolRevision"], "2024-11-05");
             assert_eq!(requirements["serverFacilities"]["store"], "required");
             assert_eq!(requirements["requiredClientCapabilities"], json!([]));
-            assert!(requirements["structuredOutputFromRevision"].is_null());
+            assert_eq!(
+                requirements["structuredOutputFromRevision"],
+                if STRUCTURED_TOOLS.contains(&expected_name) {
+                    json!("2025-06-18")
+                } else {
+                    Value::Null
+                }
+            );
             assert_eq!(requirements["legacyVisible"], true);
             let expected_embedder = if expected_name == "icm_memory_embed_all" {
                 "required"
@@ -713,6 +837,76 @@ mod tests {
                     "unused"
                 }
             );
+            assert_eq!(
+                tool.get("outputSchema").is_some(),
+                STRUCTURED_TOOLS.contains(&expected_name)
+            );
+            if let Some(schema) = tool.get("outputSchema") {
+                assert_eq!(
+                    schema.get("additionalProperties"),
+                    Some(&Value::Bool(false))
+                );
+                assert!(!contains_key(schema, "embedding"));
+            }
+        }
+    }
+
+    #[test]
+    fn dispatch_rejects_structured_output_type_drift() {
+        let catalog = ToolCatalog::new(
+            vec![ToolSpec::typed::<crate::inputs::MemoryStatsInput>(
+                "typed_output_probe",
+                "test-only output type probe",
+                json!({"type": "object", "properties": {}}),
+                None,
+                ToolAnnotations::new(true, false, true, false),
+                ToolRequirements::STORE,
+                |_, _| {
+                    ToolResult::structured(
+                        "legacy".into(),
+                        "modern".into(),
+                        &json!({"unexpected": true}),
+                    )
+                },
+            )
+            .with_output::<crate::outputs::MemoryStatsOutput>()],
+            false,
+        )
+        .unwrap();
+        let store = Store::in_memory().unwrap();
+        let working_directory = std::env::current_dir().unwrap();
+        let context = ToolContext {
+            store: &store,
+            embedder: None,
+            compact: false,
+            auto_consolidate: AutoConsolidate::default(),
+            working_directory: &working_directory,
+            enforce_directory_boundary: true,
+        };
+
+        let DispatchResult::ToolResult(result) = catalog.dispatch(
+            &context,
+            "typed_output_probe",
+            &json!({}),
+            InputValidation::Modern,
+        ) else {
+            panic!("probe should reach its handler");
+        };
+        assert!(result.is_error);
+        assert_eq!(
+            result.content[0].text,
+            "tool typed_output_probe emitted output that does not match its advertised schema"
+        );
+    }
+
+    fn contains_key(value: &Value, needle: &str) -> bool {
+        match value {
+            Value::Object(object) => {
+                object.contains_key(needle)
+                    || object.values().any(|value| contains_key(value, needle))
+            }
+            Value::Array(array) => array.iter().any(|value| contains_key(value, needle)),
+            _ => false,
         }
     }
 

@@ -303,7 +303,8 @@ pub(crate) fn build_catalog(has_embedder: bool) -> ToolCatalog {
             requirements: ToolRequirements::STORE.with_optional_embedder(),
             ToolAnnotations::new(false, true, false, false),
             tool_recall
-        ),
+        )
+        .with_output::<MemoryRecallOutput>(),
         tool_spec!(
             MemoryForgetInput,
             json!({
@@ -401,7 +402,8 @@ pub(crate) fn build_catalog(has_embedder: bool) -> ToolCatalog {
             }),
             ToolAnnotations::new(true, false, true, false),
             |context, _| tool_list_topics(context.store)
-        ),
+        )
+        .with_output::<MemoryTopicsOutput>(),
         tool_spec!(
             MemoryStatsInput,
             json!({
@@ -414,7 +416,8 @@ pub(crate) fn build_catalog(has_embedder: bool) -> ToolCatalog {
             }),
             ToolAnnotations::new(true, false, true, false),
             |context, _| tool_stats(context.store)
-        ),
+        )
+        .with_output::<MemoryStatsOutput>(),
         tool_spec!(
             MemoryUpdateInput,
             json!({
@@ -796,7 +799,8 @@ pub(crate) fn build_catalog(has_embedder: bool) -> ToolCatalog {
                 args,
                 context.compact
             )
-        ),
+        )
+        .with_output::<FeedbackOutput>(),
         tool_spec!(
             FeedbackSearchInput,
             json!({
@@ -827,7 +831,8 @@ pub(crate) fn build_catalog(has_embedder: bool) -> ToolCatalog {
             requirements: ToolRequirements::STORE.with_optional_embedder(),
             ToolAnnotations::new(true, false, true, false),
             |context, args| tool_feedback_search(context.store, context.embedder, args)
-        ),
+        )
+        .with_output::<FeedbackSearchOutput>(),
         tool_spec!(
             FeedbackStatsInput,
             json!({
@@ -840,7 +845,8 @@ pub(crate) fn build_catalog(has_embedder: bool) -> ToolCatalog {
             }),
             ToolAnnotations::new(true, false, true, false),
             |context, _| tool_feedback_stats(context.store)
-        ),
+        )
+        .with_output::<FeedbackStatsOutput>(),
         // --- Transcript tools (verbatim session replay) ---
         tool_spec!(
             TranscriptStartInput,
@@ -867,7 +873,8 @@ pub(crate) fn build_catalog(has_embedder: bool) -> ToolCatalog {
             }),
             ToolAnnotations::new(false, false, false, false),
             |context, args| tool_transcript_start_session(context.store, args)
-        ),
+        )
+        .with_output::<TranscriptStartOutput>(),
         tool_spec!(
             TranscriptRecordInput,
             json!({
@@ -907,7 +914,8 @@ pub(crate) fn build_catalog(has_embedder: bool) -> ToolCatalog {
             }),
             ToolAnnotations::new(false, false, false, false),
             |context, args| tool_transcript_record(context.store, args)
-        ),
+        )
+        .with_output::<TranscriptRecordOutput>(),
         tool_spec!(
             TranscriptSearchInput,
             json!({
@@ -940,7 +948,8 @@ pub(crate) fn build_catalog(has_embedder: bool) -> ToolCatalog {
             }),
             ToolAnnotations::new(true, false, true, false),
             |context, args| tool_transcript_search(context.store, args)
-        ),
+        )
+        .with_output::<TranscriptSearchOutput>(),
         tool_spec!(
             TranscriptShowInput,
             json!({
@@ -957,7 +966,8 @@ pub(crate) fn build_catalog(has_embedder: bool) -> ToolCatalog {
             }),
             ToolAnnotations::new(true, false, true, false),
             |context, args| tool_transcript_show(context.store, args)
-        ),
+        )
+        .with_output::<TranscriptShowOutput>(),
         tool_spec!(
             TranscriptStatsInput,
             json!({
@@ -970,7 +980,8 @@ pub(crate) fn build_catalog(has_embedder: bool) -> ToolCatalog {
             }),
             ToolAnnotations::new(true, false, true, false),
             |context, _| tool_transcript_stats(context.store)
-        ),
+        )
+        .with_output::<TranscriptStatsOutput>(),
         tool_spec!(
             WakeUpInput,
             json!({

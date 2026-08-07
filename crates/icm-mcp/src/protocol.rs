@@ -1,3 +1,5 @@
+use std::any::TypeId;
+
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
@@ -148,6 +150,8 @@ pub struct ToolResult {
     pub is_error: bool,
     #[serde(skip)]
     modern_text: Option<String>,
+    #[serde(skip)]
+    structured_content_type: Option<TypeId>,
 }
 
 #[derive(Debug, Serialize)]
@@ -167,12 +171,13 @@ impl ToolResult {
             structured_content: None,
             is_error: false,
             modern_text: None,
+            structured_content_type: None,
         }
     }
 
     pub fn structured<T>(legacy_text: String, modern_text: String, output: &T) -> Self
     where
-        T: Serialize,
+        T: Serialize + 'static,
     {
         match serde_json::to_value(output) {
             Ok(structured_content) => Self {
@@ -183,6 +188,7 @@ impl ToolResult {
                 structured_content: Some(Box::new(structured_content)),
                 is_error: false,
                 modern_text: Some(modern_text),
+                structured_content_type: Some(TypeId::of::<T>()),
             },
             Err(error) => Self::error(format!("structured output serialization failed: {error}")),
         }
@@ -197,7 +203,12 @@ impl ToolResult {
             structured_content: None,
             is_error: true,
             modern_text: None,
+            structured_content_type: None,
         }
+    }
+
+    pub(crate) fn structured_content_type(&self) -> Option<TypeId> {
+        self.structured_content_type
     }
 
     pub fn select_projection(&mut self, modern: bool) {
@@ -290,6 +301,7 @@ mod tests {
             structured_content: None,
             is_error: false,
             modern_text: None,
+            structured_content_type: None,
         };
         result.append_hint("[hint]");
         assert!(result.content.is_empty());

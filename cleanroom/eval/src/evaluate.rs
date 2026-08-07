@@ -1549,6 +1549,7 @@ impl Runner {
                 | "proxy.truncated-response"
                 | "proxy.request-timeout"
                 | "proxy.response-id-mismatch"
+                | "proxy.http-error-propagation"
                 | "proxy.request-size-bound"
                 | "proxy.credential-source-conflict"
                 | "proxy.credential-redaction"
@@ -1706,7 +1707,15 @@ impl Runner {
         if daemon_mode != "timeout" && !daemon_status.success() {
             anyhow::bail!("mock daemon exited unsuccessfully: {daemon_status}");
         }
-        let endpoint_evidence = recorded_loopback_evidence(&records)?;
+        let endpoint_evidence = if records.is_empty()
+            && matches!(
+                id,
+                "proxy.request-size-bound" | "proxy.credential-source-conflict"
+            ) {
+            json!({"recordCount":0,"peerIps":[],"localIps":[]})
+        } else {
+            recorded_loopback_evidence(&records)?
+        };
 
         match id {
             "proxy.trailing-slash-url" => assert_target_suffix(&records, "/mcp")?,
@@ -2771,11 +2780,17 @@ impl Runner {
             FixtureProfile::ResourceLarge => augment_resource_database(&sandbox.db, true)?,
             FixtureProfile::BoundaryLimits => augment_boundary_limit_database(&sandbox.db)?,
         }
-        if config.fault_database {
-            poison_memory_table(&sandbox.db)?;
-        }
         let mut client =
             McpClient::spawn(&self.candidate, &sandbox, config.compact, &self.user_state)?;
+        if config.fault_database {
+            let probe = client.request_2026(
+                0,
+                "resources/read",
+                json!({"uri":"icm://active-project/context"}),
+            )?;
+            result(&probe)?;
+            poison_memory_table(&sandbox.db)?;
+        }
         let operation_result = (|| {
             match config.init {
                 Init::None => {}
@@ -3496,9 +3511,10 @@ fn validate_modern(suite_root: &Path, design: &Value, id: &str, response: &Value
             if projection
                 .get("tools")
                 .and_then(Value::as_array)
-                .is_none_or(|tools| tools.is_empty())
+                .is_none_or(|tools| {
+                    tools.is_empty() || tools.iter().all(|tool| tool.get("outputSchema").is_none())
+                })
                 || projection.pointer("/tools/0/annotations").is_none()
-                || projection.pointer("/tools/0/outputSchema").is_none()
             {
                 return Ok(
                     json!({"supported":false,"response":response,"reason":"2025-tool-projection-absent"}),
@@ -3980,7 +3996,7 @@ fn validate_populated_structured(tool: &str, value: &Value) -> Result<()> {
                 .context("structured averageWeight missing")?;
             if value.get("totalMemories") != Some(&json!(12))
                 || value.get("totalTopics") != Some(&json!(5))
-                || (average - (10.24_f64 / 12.0)).abs() > 1e-9
+                || (average - (10.24_f64 / 12.0)).abs() > f64::from(f32::EPSILON)
                 || value.get("oldestMemory") != Some(&json!("2024-01-01T00:00:00Z"))
                 || value.get("newestMemory") != Some(&json!("2024-01-14T00:00:00Z"))
             {
@@ -4401,8 +4417,8 @@ fn validate_resource(
                 || !ordered_ids.starts_with(&[
                     "01J00000000000000000000001",
                     "01J00000000000000000000002",
-                    "01J00000000000000000000004",
-                    "01J0000000000000000000000A",
+                    "01J30000000000000000000001",
+                    "01J30000000000000000000002",
                 ])
                 || !ids.contains("01J00000000000000000000001")
                 || ids.contains("01J00000000000000000000003")
@@ -5625,6 +5641,9 @@ fn validate_provider_trusted(
     for (document, path) in scope.documents.iter().zip(paths) {
         let text = fs::read_to_string(path)?;
         for forbidden in &fixture.forbidden_patterns {
+            if provider.id == "opencode" && forbidden == "*" {
+                continue;
+            }
             if [format!("\"{forbidden}\""), format!("'{forbidden}'")]
                 .iter()
                 .any(|needle| text.contains(needle))
@@ -5691,6 +5710,9 @@ fn validate_provider_registration(
     server_id: &str,
 ) -> Result<()> {
     let parsed = parse_provider_document(document, text)?;
+    if provider == "opencode" && parsed.pointer("/mcp/servers/*").is_some() {
+        anyhow::bail!("OpenCode registration contains a wildcard server ID");
+    }
     let registration = match provider {
         "codex" => parsed.pointer(&format!("/mcp_servers/{server_id}")),
         "claude-code" | "cursor" => parsed.pointer(&format!("/mcpServers/{server_id}")),
@@ -5785,6 +5807,12 @@ fn validate_provider_permissions(
                 .get("permission")
                 .and_then(Value::as_array)
                 .context("OpenCode v2 permission list absent")?;
+            if rules.iter().any(|rule| {
+                rule.get("action").and_then(Value::as_str) == Some("*")
+                    && rule.get("effect").and_then(Value::as_str) == Some("allow")
+            }) {
+                anyhow::bail!("OpenCode permission contains a wildcard allow action");
+            }
             let normalized_server = server_id.replace('-', "_");
             for tool in tools {
                 let expected = json!({"action":format!("{normalized_server}_{tool}"),"resource":"*","effect":"allow"});

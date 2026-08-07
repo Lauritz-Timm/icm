@@ -335,6 +335,14 @@ pub fn augment_resource_database(db_path: &Path, large: bool) -> Result<()> {
     for (id, topic, summary) in rows {
         insert_resource_memory(&connection, id, topic, summary)?;
     }
+    connection.execute(
+        "UPDATE memories SET weight = 0.94 WHERE id IN (
+            '01J30000000000000000000001',
+            '01J30000000000000000000002',
+            '01J30000000000000000000007'
+        )",
+        [],
+    )?;
     if large {
         insert_resource_memory(
             &connection,

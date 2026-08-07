@@ -29,6 +29,10 @@ struct RequestRecord {
 }
 
 pub fn run(record_path: &Path, mode: &str, ipv6: bool) -> Result<()> {
+    OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(record_path)?;
     let bind = if ipv6 {
         SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), 0)
     } else {

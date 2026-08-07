@@ -73,6 +73,13 @@ pub fn run(record_path: &Path, mode: &str, ipv6: bool) -> Result<()> {
             local_address: local_address.to_string(),
         };
         append_record(record_path, &record)?;
+        if mode == "legacy-session" && request.method == "DELETE" {
+            write_raw(
+                &mut stream,
+                b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            )?;
+            continue;
+        }
         if request.target.contains("force-error") || mode == "no-retry" {
             write_json_response(
                 &mut stream,

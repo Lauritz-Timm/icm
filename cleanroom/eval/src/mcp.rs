@@ -339,13 +339,21 @@ impl McpClient {
 impl Drop for McpClient {
     fn drop(&mut self) {
         drop(self.stdin.take());
+        let _ = self.child.kill();
         let _ = terminate_child(&mut self.child, TERMINATE_TIMEOUT);
     }
 }
 
 fn terminate_child(child: &mut Child, timeout: Duration) -> io::Result<Option<ExitStatus>> {
-    if let Some(status) = child.try_wait()? {
-        return Ok(Some(status));
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Some(status) = child.try_wait()? {
+            return Ok(Some(status));
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(10));
     }
     let _ = child.kill();
     let deadline = Instant::now() + timeout;
@@ -509,5 +517,27 @@ mod tests {
         assert!(meta_key_is_valid("com.example/evaluation"));
         assert!(!meta_key_is_valid(INVALID_META_KEY_FIXTURE));
         assert!(!meta_key_is_valid("bad-/foo"));
+    }
+
+    #[test]
+    fn terminate_child_allows_natural_exit() {
+        const MARKER: &str = "ICM_EVAL_SYNTHETIC_NATURAL_EXIT";
+        if std::env::var_os(MARKER).is_some() {
+            thread::sleep(Duration::from_millis(50));
+            return;
+        }
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .arg("--exact")
+            .arg("mcp::tests::terminate_child_allows_natural_exit")
+            .arg("--nocapture")
+            .env(MARKER, "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        assert!(terminate_child(&mut child, Duration::from_secs(1))
+            .unwrap()
+            .is_some_and(|status| status.success()));
     }
 }

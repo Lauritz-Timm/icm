@@ -1635,6 +1635,9 @@ impl Runner {
                     "proxy.modern-stateless-no-session" => {
                         modern_request(request_id as u64, "tools/list", json!({}), true)
                     }
+                    "proxy.legacy-session-continuity" if call_index == 0 => {
+                        modern_request(request_id as u64, "tools/list", json!({}), true)
+                    }
                     "proxy.request-size-bound" => json!({
                         "jsonrpc":"2.0",
                         "id":request_id,
@@ -1909,8 +1912,16 @@ impl Runner {
                     .iter()
                     .filter(|record| recorded_method(record).as_deref() == Some("tools/list"))
                     .collect();
-                if records.len() != 4 || proxy_pids.len() != 1 || calls.len() != 2 {
-                    anyhow::bail!("legacy MCP session ID was not continuous across proxy calls");
+                let deletes: Vec<_> = records
+                    .iter()
+                    .filter(|record| record.get("method").and_then(Value::as_str) == Some("DELETE"))
+                    .collect();
+                if records.len() != 5
+                    || proxy_pids.len() != 1
+                    || calls.len() != 2
+                    || deletes.len() != 1
+                {
+                    anyhow::bail!("legacy MCP session continuity or EOF cleanup was incomplete");
                 }
                 for call in calls {
                     assert_proxy_transport_headers(
@@ -1918,6 +1929,19 @@ impl Runner {
                         "2025-11-25",
                         Some("synthetic-legacy-session-001"),
                     )?;
+                }
+                let delete = deletes[0];
+                let headers = delete
+                    .get("headers")
+                    .and_then(Value::as_object)
+                    .context("proxy DELETE record lacks headers")?;
+                if delete.get("target").and_then(Value::as_str) != Some("/mcp")
+                    || headers.get("mcp-protocol-version").and_then(Value::as_str)
+                        != Some("2025-11-25")
+                    || headers.get("mcp-session-id").and_then(Value::as_str)
+                        != Some("synthetic-legacy-session-001")
+                {
+                    anyhow::bail!("proxy EOF cleanup did not use the negotiated session");
                 }
             }
             "proxy.modern-stateless-no-session" => {
@@ -2061,13 +2085,17 @@ impl Runner {
         }
         let proxy_pid = proxy.process_id();
         let capture = proxy.shutdown()?;
-        self.record_raw(id, &capture.exchanges, &capture.stdout, &capture.stderr)?;
-        self.verify_capture(
-            sandbox,
-            &capture.exchanges,
-            &capture.stdout,
-            &capture.stderr,
-        )?;
+        let proxy_transcript = normalize_transcript(&capture.exchanges, &empty_fixture_state());
+        let (lifecycle, lifecycle_exchanges) = if id == "proxy.real-daemon-cleanup" {
+            let (detail, exchanges) = verify_real_daemon_lifecycle(&daemon.url)?;
+            (Some(detail), exchanges)
+        } else {
+            (None, Vec::new())
+        };
+        let mut raw_exchanges = capture.exchanges.clone();
+        raw_exchanges.extend(lifecycle_exchanges);
+        self.record_raw(id, &raw_exchanges, &capture.stdout, &capture.stderr)?;
+        self.verify_capture(sandbox, &raw_exchanges, &capture.stdout, &capture.stderr)?;
         let daemon_pid = daemon.child.id()?;
         daemon.child.terminate()?;
         let stderr = daemon
@@ -2076,18 +2104,18 @@ impl Runner {
             .context("timed out collecting real daemon stderr")??;
         sandbox.verify_nondisclosure(&String::from_utf8_lossy(&stderr))?;
         sandbox.verify()?;
-        self.passed(
-            id,
-            json!({
-                "supported":true,
-                "realCandidateDaemon":true,
-                "proxyPid":proxy_pid,
-                "daemonPid":daemon_pid,
-                "daemonReaped":true,
-                "responseSha256":sha256_bytes(serde_json::to_string(&response)?.as_bytes())
-            }),
-            &normalize_transcript(&capture.exchanges, &empty_fixture_state()),
-        )
+        let mut detail = json!({
+            "supported":true,
+            "realCandidateDaemon":true,
+            "proxyPid":proxy_pid,
+            "daemonPid":daemon_pid,
+            "daemonReaped":true,
+            "responseSha256":sha256_bytes(serde_json::to_string(&response)?.as_bytes())
+        });
+        if let Some(lifecycle) = lifecycle {
+            detail["lifecycle"] = lifecycle;
+        }
+        self.passed(id, detail, &proxy_transcript)
     }
 
     fn start_real_candidate_daemon(&self, sandbox: &ScenarioSandbox) -> Result<RealDaemon> {
@@ -6123,6 +6151,204 @@ fn recorded_loopback_evidence(records: &[Value]) -> Result<Value> {
         "peerIps": peer_ips,
         "localIps": local_ips
     }))
+}
+
+struct HttpProbe {
+    status: u16,
+    headers: BTreeMap<String, String>,
+    exchange: Exchange,
+}
+
+fn verify_real_daemon_lifecycle(base_url: &str) -> Result<(Value, Vec<Exchange>)> {
+    let mut exchanges = Vec::new();
+    let tools = serde_json::to_string(&tools_list(71))?;
+    let origin_status = expect_http(
+        base_url,
+        &mut exchanges,
+        "invalid Origin",
+        "POST",
+        &[("Origin", "https://attacker.invalid")],
+        &tools,
+        403,
+    )?;
+
+    let initialize = serde_json::to_string(&json!({
+        "jsonrpc":"2.0",
+        "id":72,
+        "method":"initialize",
+        "params":{
+            "protocolVersion":"2025-11-25",
+            "capabilities":{},
+            "clientInfo":{"name":"icm-cleanroom-eval","version":"1"}
+        }
+    }))?;
+    let initialized = probe_http(base_url, "POST", &[], &initialize)?;
+    let initialized_status = initialized.status;
+    let session_id = initialized
+        .headers
+        .get("mcp-session-id")
+        .filter(|value| !value.is_empty())
+        .context("real daemon initialize response lacks Mcp-Session-Id")?
+        .to_owned();
+    exchanges.push(initialized.exchange);
+    if initialized_status != 200 {
+        anyhow::bail!("real daemon initialize returned HTTP {initialized_status}");
+    }
+
+    let invalid_status = expect_http(
+        base_url,
+        &mut exchanges,
+        "invalid protocol version",
+        "POST",
+        &[
+            ("MCP-Protocol-Version", "synthetic-invalid"),
+            ("Mcp-Session-Id", session_id.as_str()),
+        ],
+        &tools,
+        400,
+    )?;
+    let mismatched_status = expect_http(
+        base_url,
+        &mut exchanges,
+        "mismatched protocol version",
+        "POST",
+        &[
+            ("MCP-Protocol-Version", "2025-06-18"),
+            ("Mcp-Session-Id", session_id.as_str()),
+        ],
+        &tools,
+        400,
+    )?;
+    let unknown_status = expect_http(
+        base_url,
+        &mut exchanges,
+        "unknown session",
+        "POST",
+        &[
+            ("MCP-Protocol-Version", "2025-11-25"),
+            ("Mcp-Session-Id", "synthetic-unknown-session"),
+        ],
+        &tools,
+        404,
+    )?;
+
+    let delete = probe_http(
+        base_url,
+        "DELETE",
+        &[
+            ("MCP-Protocol-Version", "2025-11-25"),
+            ("Mcp-Session-Id", session_id.as_str()),
+        ],
+        "",
+    )?;
+    let delete_status = delete.status;
+    exchanges.push(delete.exchange);
+    if !(200..300).contains(&delete_status) {
+        anyhow::bail!("real daemon session DELETE returned HTTP {delete_status}");
+    }
+
+    let terminated_status = expect_http(
+        base_url,
+        &mut exchanges,
+        "terminated session",
+        "POST",
+        &[
+            ("MCP-Protocol-Version", "2025-11-25"),
+            ("Mcp-Session-Id", session_id.as_str()),
+        ],
+        &tools,
+        404,
+    )?;
+
+    Ok((
+        json!({
+            "invalidOriginStatus":origin_status,
+            "initializeStatus":initialized_status,
+            "invalidVersionStatus":invalid_status,
+            "mismatchedVersionStatus":mismatched_status,
+            "unknownSessionStatus":unknown_status,
+            "deleteStatus":delete_status,
+            "terminatedSessionStatus":terminated_status
+        }),
+        exchanges,
+    ))
+}
+
+fn expect_http(
+    base_url: &str,
+    exchanges: &mut Vec<Exchange>,
+    label: &str,
+    method: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+    expected: u16,
+) -> Result<u16> {
+    let probe = probe_http(base_url, method, headers, body)?;
+    let status = probe.status;
+    exchanges.push(probe.exchange);
+    if status != expected {
+        anyhow::bail!("real daemon {label} returned HTTP {status}, expected {expected}");
+    }
+    Ok(status)
+}
+
+fn probe_http(
+    base_url: &str,
+    method: &str,
+    headers: &[(&str, &str)],
+    body: &str,
+) -> Result<HttpProbe> {
+    let address = loopback_address_from_url(base_url)?;
+    let authority = base_url
+        .strip_prefix("http://")
+        .and_then(|value| value.split('/').next())
+        .context("real daemon URL lacks HTTP authority")?;
+    let mut request = format!(
+        "{method} /mcp HTTP/1.1\r\nHost: {authority}\r\nAccept: application/json, text/event-stream\r\n"
+    );
+    if !body.is_empty() {
+        request.push_str("Content-Type: application/json\r\n");
+    }
+    for (name, value) in headers {
+        request.push_str(name);
+        request.push_str(": ");
+        request.push_str(value);
+        request.push_str("\r\n");
+    }
+    request.push_str(&format!(
+        "Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    ));
+
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(2))?;
+    stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+    stream.set_write_timeout(Some(Duration::from_secs(2)))?;
+    let started = Instant::now();
+    stream.write_all(request.as_bytes())?;
+    stream.flush()?;
+    let response = String::from_utf8(read_bounded_to_end(&mut stream, 64 * 1024)?)?;
+    let (head, _) = response
+        .split_once("\r\n\r\n")
+        .context("real daemon HTTP response lacks a header terminator")?;
+    let mut lines = head.split("\r\n");
+    let status = lines
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .context("real daemon HTTP response lacks a status")?
+        .parse()?;
+    let response_headers = lines
+        .filter_map(|line| line.split_once(':'))
+        .map(|(name, value)| (name.trim().to_ascii_lowercase(), value.trim().to_owned()))
+        .collect();
+    Ok(HttpProbe {
+        status,
+        headers: response_headers,
+        exchange: Exchange {
+            request,
+            response: Some(response),
+            duration_micros: started.elapsed().as_micros(),
+        },
+    })
 }
 
 fn shutdown_mock_daemon(base_url: &str) -> Result<()> {

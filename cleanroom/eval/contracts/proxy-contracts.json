@@ -1,6 +1,9 @@
 {
-  "contractVersion": 1,
-  "accessedAt": "2026-08-05",
+  "contractVersion": 2,
+  "accessedAt": "2026-08-07",
+  "sources": [
+    "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports"
+  ],
   "cli": {
     "command": "proxy --url <base-url> [--compact] [--token-file <path>]",
     "tokenEnvironment": "ICM_PROXY_TOKEN",
@@ -36,6 +39,19 @@
     "completeBodyRequired": true,
     "requestAndResponseBoundsRequired": true,
     "timeoutRequired": true
+  },
+  "serverHttp": {
+    "originAbsentAccepted": true,
+    "nonLoopbackOrInvalidOriginStatus": 403,
+    "unknownOrTerminatedSessionStatus": 404,
+    "invalidOrMismatchedProtocolVersionStatus": 400,
+    "deleteTerminatesSession": true
+  },
+  "proxySessionLifecycle": {
+    "negotiatedVersionLockedUntilEof": true,
+    "bodyMetadataCannotOverrideNegotiatedVersion": true,
+    "deleteOnEof": true,
+    "deleteUsesNegotiatedVersionAndSession": true
   },
   "auth": {
     "authorization": "Bearer <trimmed-token>",

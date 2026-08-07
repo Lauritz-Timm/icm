@@ -1,3 +1,5 @@
+pub mod catalog;
+mod inputs;
 pub mod protocol;
 pub mod server;
 pub mod tools;

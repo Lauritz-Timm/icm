@@ -10,6 +10,10 @@ use icm_core::{
 };
 use icm_store::Store;
 
+use crate::catalog::{
+    DispatchResult, ToolAnnotations, ToolCatalog, ToolContext, ToolRequirements, ToolSpec,
+};
+use crate::inputs::*;
 use crate::protocol::ToolResult;
 
 /// Historical default threshold for auto-consolidation. The live value comes
@@ -44,8 +48,8 @@ impl Default for AutoConsolidate {
     }
 }
 
-/// Maximum allowed length for topic names. Must stay <= the store
-/// layer's `MAX_TOPIC_BYTES` so the MCP-level rejection happens
+/// Maximum allowed UTF-8 byte length for topic names. Must stay <= the
+/// store layer's `MAX_TOPIC_BYTES` so the MCP-level rejection happens
 /// *before* the store's lower-level validation does.
 const MAX_TOPIC_LEN: usize = 255;
 
@@ -106,652 +110,935 @@ fn try_auto_consolidate(
 // Tool schemas for tools/list
 // ---------------------------------------------------------------------------
 
-pub fn tool_definitions(has_embedder: bool) -> Value {
-    let mut tools = vec![
+fn normalize_legacy_recall_input(arguments: &Value) -> Value {
+    let mut normalized = arguments.clone();
+    let Some(object) = normalized.as_object_mut() else {
+        return normalized;
+    };
+    let Some(limit) = object.get("limit").filter(|limit| limit.is_number()) else {
+        return normalized;
+    };
+
+    // The frozen 2024 handler read limits as i64, defaulted unrepresentable
+    // numeric values to five, and clamped the result to its advertised 1..20
+    // range. Normalize only for that catalog projection; the modern DTO keeps
+    // its strict 1..100 contract and reaches the handler unchanged.
+    let normalized_limit = limit.as_i64().unwrap_or(5).clamp(1, 20);
+    object.insert("limit".into(), json!(normalized_limit));
+    normalized
+}
+
+macro_rules! tool_spec {
+    (
+        $input:ty,
+        json!({
+            "name": $name:literal,
+            "description": $description:literal,
+            "inputSchema": $input_schema:tt
+        }),
+        $annotations:expr,
+        $handler:expr
+    ) => {
+        ToolSpec::typed::<$input>(
+            $name,
+            $description,
+            json!($input_schema),
+            None,
+            $annotations,
+            ToolRequirements::STORE,
+            $handler,
+        )
+    };
+    (
+        $input:ty,
+        json!({
+            "name": $name:literal,
+            "description": $description:literal,
+            "inputSchema": $input_schema:tt
+        }),
+        legacy_normalizer: $legacy_normalizer:expr,
+        $annotations:expr,
+        $handler:expr
+    ) => {
+        ToolSpec::typed::<$input>(
+            $name,
+            $description,
+            json!($input_schema),
+            Some($legacy_normalizer),
+            $annotations,
+            ToolRequirements::STORE,
+            $handler,
+        )
+    };
+    (
+        $input:ty,
+        json!({
+            "name": $name:literal,
+            "description": $description:literal,
+            "inputSchema": $input_schema:tt
+        }),
+        requirements: $requirements:expr,
+        $annotations:expr,
+        $handler:expr
+    ) => {
+        ToolSpec::typed::<$input>(
+            $name,
+            $description,
+            json!($input_schema),
+            None,
+            $annotations,
+            $requirements,
+            $handler,
+        )
+    };
+    (
+        $input:ty,
+        json!({
+            "name": $name:literal,
+            "description": $description:literal,
+            "inputSchema": $input_schema:tt
+        }),
+        legacy_normalizer: $legacy_normalizer:expr,
+        requirements: $requirements:expr,
+        $annotations:expr,
+        $handler:expr
+    ) => {
+        ToolSpec::typed::<$input>(
+            $name,
+            $description,
+            json!($input_schema),
+            Some($legacy_normalizer),
+            $annotations,
+            $requirements,
+            $handler,
+        )
+    };
+}
+
+pub(crate) fn build_catalog(has_embedder: bool) -> ToolCatalog {
+    let tools = vec![
         // --- Memory tools ---
-        json!({
-            "name": "icm_memory_store",
-            "description": "Store important information in ICM long-term memory. Use to save decisions, preferences, project context, resolved errors — anything that should persist between sessions.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "topic": {
-                        "type": "string",
-                        "description": "Category/namespace. Use the canonical topics from the server instructions: 'decisions-{project}', 'preferences', 'errors-resolved', 'context-{project}' — mixed-language topic names fragment the memory."
+        tool_spec!(
+            MemoryStoreInput,
+            json!({
+                "name": "icm_memory_store",
+                "description": "Store important information in ICM long-term memory. Use to save decisions, preferences, project context, resolved errors — anything that should persist between sessions.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {
+                            "type": "string",
+                            "description": "Category/namespace. Use the canonical topics from the server instructions: 'decisions-{project}', 'preferences', 'errors-resolved', 'context-{project}' — mixed-language topic names fragment the memory."
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Information to memorize — be concise but complete"
+                        },
+                        "importance": {
+                            "type": "string",
+                            "enum": ["critical", "high", "medium", "low"],
+                            "default": "medium",
+                            "description": "critical=never forgotten, high=slow decay, medium=normal, low=fast decay"
+                        },
+                        "keywords": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "Keywords to improve search"
+                        },
+                        "raw_excerpt": {
+                            "type": "string",
+                            "description": "Optional verbatim (code, exact error message, etc.)"
+                        }
                     },
-                    "content": {
-                        "type": "string",
-                        "description": "Information to memorize — be concise but complete"
+                    "required": ["topic", "content"]
+                }
+            }),
+            requirements: ToolRequirements::STORE.with_optional_embedder(),
+            ToolAnnotations::new(false, true, false, false),
+            |context, args| tool_store(
+                context.store,
+                context.embedder,
+                args,
+                context.compact,
+                context.auto_consolidate
+            )
+        ),
+        tool_spec!(
+            MemoryRecallInput,
+            json!({
+                "name": "icm_memory_recall",
+                "description": "Search ICM long-term memory. Use to find past decisions, project context, preferences, or solutions to previously encountered problems.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Natural language search query"
+                        },
+                        "topic": {
+                            "type": "string",
+                            "description": "Filter by specific topic (optional)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "default": 5,
+                            "minimum": 1,
+                            "maximum": 20,
+                            "description": "Max number of results"
+                        },
+                        "keyword": {
+                            "type": "string",
+                            "description": "Filter results by keyword (exact match on memory keywords)"
+                        },
+                        "project": {
+                            "type": "string",
+                            "description": "Project filter (segment-aware). Defaults to the server's cwd directory name. Pass an empty string to disable the filter and search across all projects."
+                        }
                     },
-                    "importance": {
-                        "type": "string",
-                        "enum": ["critical", "high", "medium", "low"],
-                        "default": "medium",
-                        "description": "critical=never forgotten, high=slow decay, medium=normal, low=fast decay"
+                    "required": ["query"]
+                }
+            }),
+            legacy_normalizer: normalize_legacy_recall_input,
+            requirements: ToolRequirements::STORE.with_optional_embedder(),
+            ToolAnnotations::new(false, true, false, false),
+            |context, args| tool_recall(context.store, context.embedder, args, context.compact)
+        ),
+        tool_spec!(
+            MemoryForgetInput,
+            json!({
+                "name": "icm_memory_forget",
+                "description": "Delete a specific memory by its ID. Use when information is obsolete or incorrect.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "Memory ID to delete"
+                        }
                     },
-                    "keywords": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "Keywords to improve search"
+                    "required": ["id"]
+                }
+            }),
+            ToolAnnotations::new(false, true, true, false),
+            |context, args| tool_forget(context.store, args)
+        ),
+        tool_spec!(
+            TopicInput,
+            json!({
+                "name": "icm_memory_forget_topic",
+                "description": "Delete ALL memories in a topic. Use to clear an entire topic at once.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {
+                            "type": "string",
+                            "description": "Topic whose memories should all be deleted"
+                        }
                     },
-                    "raw_excerpt": {
-                        "type": "string",
-                        "description": "Optional verbatim (code, exact error message, etc.)"
-                    }
-                },
-                "required": ["topic", "content"]
-            }
-        }),
-        json!({
-            "name": "icm_memory_recall",
-            "description": "Search ICM long-term memory. Use to find past decisions, project context, preferences, or solutions to previously encountered problems.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Natural language search query"
-                    },
-                    "topic": {
-                        "type": "string",
-                        "description": "Filter by specific topic (optional)"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "default": 5,
-                        "minimum": 1,
-                        "maximum": 20,
-                        "description": "Max number of results"
-                    },
-                    "keyword": {
-                        "type": "string",
-                        "description": "Filter results by keyword (exact match on memory keywords)"
-                    },
-                    "project": {
-                        "type": "string",
-                        "description": "Project filter (segment-aware). Defaults to the server's cwd directory name. Pass an empty string to disable the filter and search across all projects."
-                    }
-                },
-                "required": ["query"]
-            }
-        }),
-        json!({
-            "name": "icm_memory_forget",
-            "description": "Delete a specific memory by its ID. Use when information is obsolete or incorrect.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "id": {
-                        "type": "string",
-                        "description": "Memory ID to delete"
-                    }
-                },
-                "required": ["id"]
-            }
-        }),
-        json!({
-            "name": "icm_memory_forget_topic",
-            "description": "Delete ALL memories in a topic. Use to clear an entire topic at once.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "topic": {
-                        "type": "string",
-                        "description": "Topic whose memories should all be deleted"
-                    }
-                },
-                "required": ["topic"]
-            }
-        }),
-        json!({
-            "name": "icm_learn",
-            "description": "Scan a project directory and create a Memoir knowledge graph with its structure, dependencies, modules, and config files.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "directory": {
-                        "type": "string",
-                        "description": "Project directory to scan (default: current working directory)"
-                    },
-                    "name": {
-                        "type": "string",
-                        "description": "Memoir name (default: directory name)"
+                    "required": ["topic"]
+                }
+            }),
+            ToolAnnotations::new(false, true, true, false),
+            |context, args| tool_forget_topic(context.store, args)
+        ),
+        tool_spec!(
+            LearnInput,
+            json!({
+                "name": "icm_learn",
+                "description": "Scan a project directory and create a Memoir knowledge graph with its structure, dependencies, modules, and config files.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "directory": {
+                            "type": "string",
+                            "description": "Project directory to scan (default: current working directory)"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Memoir name (default: directory name)"
+                        }
                     }
                 }
-            }
-        }),
-        json!({
-            "name": "icm_memory_consolidate",
-            "description": "Consolidate all memories of a topic into a single summary. Useful when a topic accumulates too many entries.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "topic": {
-                        "type": "string",
-                        "description": "Topic to consolidate"
+            }),
+            requirements: ToolRequirements::STORE.with_filesystem_read(),
+            ToolAnnotations::new(false, true, false, true),
+            tool_learn_bounded
+        ),
+        tool_spec!(
+            MemoryConsolidateInput,
+            json!({
+                "name": "icm_memory_consolidate",
+                "description": "Consolidate all memories of a topic into a single summary. Useful when a topic accumulates too many entries.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {
+                            "type": "string",
+                            "description": "Topic to consolidate"
+                        },
+                        "summary": {
+                            "type": "string",
+                            "description": "Consolidated summary to replace all memories in the topic"
+                        }
                     },
-                    "summary": {
-                        "type": "string",
-                        "description": "Consolidated summary to replace all memories in the topic"
-                    }
-                },
-                "required": ["topic", "summary"]
-            }
-        }),
-        json!({
-            "name": "icm_memory_list_topics",
-            "description": "List all available topics in memory with their counts.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {}
-            }
-        }),
-        json!({
-            "name": "icm_memory_stats",
-            "description": "Get global ICM memory statistics.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {}
-            }
-        }),
-        json!({
-            "name": "icm_memory_update",
-            "description": "Update an existing memory in-place. Use to correct, refresh, or extend a memory without creating a duplicate.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "id": {
-                        "type": "string",
-                        "description": "Memory ID to update"
+                    "required": ["topic", "summary"]
+                }
+            }),
+            requirements: ToolRequirements::STORE.with_optional_embedder(),
+            ToolAnnotations::new(false, true, false, false),
+            |context, args| tool_consolidate(context.store, context.embedder, args)
+        ),
+        tool_spec!(
+            MemoryListTopicsInput,
+            json!({
+                "name": "icm_memory_list_topics",
+                "description": "List all available topics in memory with their counts.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }),
+            ToolAnnotations::new(true, false, true, false),
+            |context, _| tool_list_topics(context.store)
+        ),
+        tool_spec!(
+            MemoryStatsInput,
+            json!({
+                "name": "icm_memory_stats",
+                "description": "Get global ICM memory statistics.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }),
+            ToolAnnotations::new(true, false, true, false),
+            |context, _| tool_stats(context.store)
+        ),
+        tool_spec!(
+            MemoryUpdateInput,
+            json!({
+                "name": "icm_memory_update",
+                "description": "Update an existing memory in-place. Use to correct, refresh, or extend a memory without creating a duplicate.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "id": {
+                            "type": "string",
+                            "description": "Memory ID to update"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "New content (replaces existing summary)"
+                        },
+                        "importance": {
+                            "type": "string",
+                            "enum": ["critical", "high", "medium", "low"],
+                            "description": "New importance level (optional, keeps existing if not set)"
+                        },
+                        "keywords": {
+                            "type": "array",
+                            "items": { "type": "string" },
+                            "description": "New keywords (optional, keeps existing if not set)"
+                        }
                     },
-                    "content": {
-                        "type": "string",
-                        "description": "New content (replaces existing summary)"
-                    },
-                    "importance": {
-                        "type": "string",
-                        "enum": ["critical", "high", "medium", "low"],
-                        "description": "New importance level (optional, keeps existing if not set)"
-                    },
-                    "keywords": {
-                        "type": "array",
-                        "items": { "type": "string" },
-                        "description": "New keywords (optional, keeps existing if not set)"
-                    }
-                },
-                "required": ["id", "content"]
-            }
-        }),
-        json!({
-            "name": "icm_memory_health",
-            "description": "Get health stats for all topics: entry count, staleness, consolidation needs. Use to audit memory hygiene.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "topic": {
-                        "type": "string",
-                        "description": "Check a specific topic (optional — checks all if omitted)"
+                    "required": ["id", "content"]
+                }
+            }),
+            requirements: ToolRequirements::STORE.with_optional_embedder(),
+            ToolAnnotations::new(false, true, false, false),
+            |context, args| tool_update(context.store, context.embedder, args)
+        ),
+        tool_spec!(
+            MemoryHealthInput,
+            json!({
+                "name": "icm_memory_health",
+                "description": "Get health stats for all topics: entry count, staleness, consolidation needs. Use to audit memory hygiene.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {
+                            "type": "string",
+                            "description": "Check a specific topic (optional — checks all if omitted)"
+                        }
                     }
                 }
-            }
-        }),
+            }),
+            ToolAnnotations::new(true, false, true, false),
+            |context, args| tool_health(context.store, args)
+        ),
         // --- Memoir tools ---
-        json!({
-            "name": "icm_memoir_create",
-            "description": "Create a new memoir — a permanent knowledge container. Memoirs hold concepts that never decay.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Unique human-readable name for the memoir"
+        tool_spec!(
+            MemoirCreateInput,
+            json!({
+                "name": "icm_memoir_create",
+                "description": "Create a new memoir — a permanent knowledge container. Memoirs hold concepts that never decay.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Unique human-readable name for the memoir"
+                        },
+                        "description": {
+                            "type": "string",
+                            "description": "Description of what this memoir is for"
+                        }
                     },
-                    "description": {
-                        "type": "string",
-                        "description": "Description of what this memoir is for"
-                    }
-                },
-                "required": ["name"]
-            }
-        }),
-        json!({
-            "name": "icm_memoir_list",
-            "description": "List all memoirs with their concept counts.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {}
-            }
-        }),
-        json!({
-            "name": "icm_memoir_show",
-            "description": "Show a memoir's stats, labels, and all its concepts.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Memoir name"
-                    }
-                },
-                "required": ["name"]
-            }
-        }),
-        json!({
-            "name": "icm_memoir_add_concept",
-            "description": "Add a permanent concept to a memoir. Concepts are knowledge nodes that get refined, never decayed.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "memoir": {
-                        "type": "string",
-                        "description": "Memoir name"
+                    "required": ["name"]
+                }
+            }),
+            ToolAnnotations::new(false, false, false, false),
+            |context, args| tool_memoir_create(context.store, args)
+        ),
+        tool_spec!(
+            MemoirListInput,
+            json!({
+                "name": "icm_memoir_list",
+                "description": "List all memoirs with their concept counts.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }),
+            ToolAnnotations::new(true, false, true, false),
+            |context, _| tool_memoir_list(context.store)
+        ),
+        tool_spec!(
+            NameInput,
+            json!({
+                "name": "icm_memoir_show",
+                "description": "Show a memoir's stats, labels, and all its concepts.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Memoir name"
+                        }
                     },
-                    "name": {
-                        "type": "string",
-                        "description": "Concept name (unique within memoir)"
+                    "required": ["name"]
+                }
+            }),
+            ToolAnnotations::new(true, false, true, false),
+            |context, args| tool_memoir_show(context.store, args)
+        ),
+        tool_spec!(
+            MemoirAddConceptInput,
+            json!({
+                "name": "icm_memoir_add_concept",
+                "description": "Add a permanent concept to a memoir. Concepts are knowledge nodes that get refined, never decayed.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "memoir": {
+                            "type": "string",
+                            "description": "Memoir name"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Concept name (unique within memoir)"
+                        },
+                        "definition": {
+                            "type": "string",
+                            "description": "Dense description of the concept"
+                        },
+                        "labels": {
+                            "type": "string",
+                            "description": "Comma-separated labels (namespace:value or plain tag). E.g. 'domain:arch,type:decision'"
+                        }
                     },
-                    "definition": {
-                        "type": "string",
-                        "description": "Dense description of the concept"
+                    "required": ["memoir", "name", "definition"]
+                }
+            }),
+            ToolAnnotations::new(false, false, false, false),
+            |context, args| tool_memoir_add_concept(context.store, args)
+        ),
+        tool_spec!(
+            MemoirRefineInput,
+            json!({
+                "name": "icm_memoir_refine",
+                "description": "Refine an existing concept with a new, improved definition. Bumps revision and boosts confidence.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "memoir": {
+                            "type": "string",
+                            "description": "Memoir name"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Concept name"
+                        },
+                        "definition": {
+                            "type": "string",
+                            "description": "New, refined definition"
+                        }
                     },
-                    "labels": {
-                        "type": "string",
-                        "description": "Comma-separated labels (namespace:value or plain tag). E.g. 'domain:arch,type:decision'"
-                    }
-                },
-                "required": ["memoir", "name", "definition"]
-            }
-        }),
-        json!({
-            "name": "icm_memoir_refine",
-            "description": "Refine an existing concept with a new, improved definition. Bumps revision and boosts confidence.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "memoir": {
-                        "type": "string",
-                        "description": "Memoir name"
+                    "required": ["memoir", "name", "definition"]
+                }
+            }),
+            ToolAnnotations::new(false, true, false, false),
+            |context, args| tool_memoir_refine(context.store, args)
+        ),
+        tool_spec!(
+            MemoirSearchInput,
+            json!({
+                "name": "icm_memoir_search",
+                "description": "Full-text search concepts within a memoir.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "memoir": {
+                            "type": "string",
+                            "description": "Memoir name"
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "Search query"
+                        },
+                        "label": {
+                            "type": "string",
+                            "description": "Filter by label (e.g. 'domain:tech')"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "default": 10,
+                            "description": "Max results"
+                        }
                     },
-                    "name": {
-                        "type": "string",
-                        "description": "Concept name"
+                    "required": ["memoir", "query"]
+                }
+            }),
+            ToolAnnotations::new(true, false, true, false),
+            |context, args| tool_memoir_search(context.store, args)
+        ),
+        tool_spec!(
+            MemoirLinkInput,
+            json!({
+                "name": "icm_memoir_link",
+                "description": "Create a directed, typed edge between two concepts in the same memoir.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "memoir": {
+                            "type": "string",
+                            "description": "Memoir name"
+                        },
+                        "from": {
+                            "type": "string",
+                            "description": "Source concept name"
+                        },
+                        "to": {
+                            "type": "string",
+                            "description": "Target concept name"
+                        },
+                        "relation": {
+                            "type": "string",
+                            "enum": ["part_of", "depends_on", "related_to", "contradicts", "refines", "alternative_to", "caused_by", "instance_of", "superseded_by"],
+                            "description": "Relation type"
+                        }
                     },
-                    "definition": {
-                        "type": "string",
-                        "description": "New, refined definition"
-                    }
-                },
-                "required": ["memoir", "name", "definition"]
-            }
-        }),
-        json!({
-            "name": "icm_memoir_search",
-            "description": "Full-text search concepts within a memoir.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "memoir": {
-                        "type": "string",
-                        "description": "Memoir name"
+                    "required": ["memoir", "from", "to", "relation"]
+                }
+            }),
+            ToolAnnotations::new(false, false, false, false),
+            |context, args| tool_memoir_link(context.store, args)
+        ),
+        tool_spec!(
+            MemoirInspectInput,
+            json!({
+                "name": "icm_memoir_inspect",
+                "description": "Inspect a concept and its graph neighborhood (BFS).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "memoir": {
+                            "type": "string",
+                            "description": "Memoir name"
+                        },
+                        "name": {
+                            "type": "string",
+                            "description": "Concept name"
+                        },
+                        "depth": {
+                            "type": "integer",
+                            "default": 1,
+                            "description": "BFS depth"
+                        }
                     },
-                    "query": {
-                        "type": "string",
-                        "description": "Search query"
+                    "required": ["memoir", "name"]
+                }
+            }),
+            ToolAnnotations::new(true, false, true, false),
+            |context, args| tool_memoir_inspect(context.store, args)
+        ),
+        tool_spec!(
+            MemoirExportInput,
+            json!({
+                "name": "icm_memoir_export",
+                "description": "Export a memoir's full concept graph. Formats: json (structured), dot (Graphviz), ascii (visual), ai (compact markdown for LLM context).",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "description": "Memoir name"
+                        },
+                        "format": {
+                            "type": "string",
+                            "enum": ["json", "dot", "ascii", "ai"],
+                            "default": "json",
+                            "description": "Output format: json (structured), dot (Graphviz), ascii (visual graph), ai (compact markdown for LLM)"
+                        }
                     },
-                    "label": {
-                        "type": "string",
-                        "description": "Filter by label (e.g. 'domain:tech')"
+                    "required": ["name"]
+                }
+            }),
+            ToolAnnotations::new(true, false, true, false),
+            |context, args| tool_memoir_export(context.store, args)
+        ),
+        tool_spec!(
+            ExtractPatternsInput,
+            json!({
+                "name": "icm_memory_extract_patterns",
+                "description": "Detect recurring patterns in a topic by keyword similarity. Optionally create concepts in a memoir from detected patterns.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {
+                            "type": "string",
+                            "description": "Topic to analyze for patterns"
+                        },
+                        "memoir": {
+                            "type": "string",
+                            "description": "Memoir name — if provided, creates concepts from detected patterns"
+                        },
+                        "min_cluster_size": {
+                            "type": "integer",
+                            "default": 3,
+                            "minimum": 2,
+                            "description": "Minimum number of similar memories to form a pattern (default: 3)"
+                        }
                     },
-                    "limit": {
-                        "type": "integer",
-                        "default": 10,
-                        "description": "Max results"
-                    }
-                },
-                "required": ["memoir", "query"]
-            }
-        }),
-        json!({
-            "name": "icm_memoir_link",
-            "description": "Create a directed, typed edge between two concepts in the same memoir.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "memoir": {
-                        "type": "string",
-                        "description": "Memoir name"
+                    "required": ["topic"]
+                }
+            }),
+            ToolAnnotations::new(false, false, false, false),
+            |context, args| tool_extract_patterns(context.store, args)
+        ),
+        tool_spec!(
+            MemoirSearchAllInput,
+            json!({
+                "name": "icm_memoir_search_all",
+                "description": "Full-text search concepts across all memoirs.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "default": 10,
+                            "description": "Max results"
+                        }
                     },
-                    "from": {
-                        "type": "string",
-                        "description": "Source concept name"
-                    },
-                    "to": {
-                        "type": "string",
-                        "description": "Target concept name"
-                    },
-                    "relation": {
-                        "type": "string",
-                        "enum": ["part_of", "depends_on", "related_to", "contradicts", "refines", "alternative_to", "caused_by", "instance_of", "superseded_by"],
-                        "description": "Relation type"
-                    }
-                },
-                "required": ["memoir", "from", "to", "relation"]
-            }
-        }),
-        json!({
-            "name": "icm_memoir_inspect",
-            "description": "Inspect a concept and its graph neighborhood (BFS).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "memoir": {
-                        "type": "string",
-                        "description": "Memoir name"
-                    },
-                    "name": {
-                        "type": "string",
-                        "description": "Concept name"
-                    },
-                    "depth": {
-                        "type": "integer",
-                        "default": 1,
-                        "description": "BFS depth"
-                    }
-                },
-                "required": ["memoir", "name"]
-            }
-        }),
-        json!({
-            "name": "icm_memoir_export",
-            "description": "Export a memoir's full concept graph. Formats: json (structured), dot (Graphviz), ascii (visual), ai (compact markdown for LLM context).",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "name": {
-                        "type": "string",
-                        "description": "Memoir name"
-                    },
-                    "format": {
-                        "type": "string",
-                        "enum": ["json", "dot", "ascii", "ai"],
-                        "default": "json",
-                        "description": "Output format: json (structured), dot (Graphviz), ascii (visual graph), ai (compact markdown for LLM)"
-                    }
-                },
-                "required": ["name"]
-            }
-        }),
-        json!({
-            "name": "icm_memory_extract_patterns",
-            "description": "Detect recurring patterns in a topic by keyword similarity. Optionally create concepts in a memoir from detected patterns.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "topic": {
-                        "type": "string",
-                        "description": "Topic to analyze for patterns"
-                    },
-                    "memoir": {
-                        "type": "string",
-                        "description": "Memoir name — if provided, creates concepts from detected patterns"
-                    },
-                    "min_cluster_size": {
-                        "type": "integer",
-                        "default": 3,
-                        "minimum": 2,
-                        "description": "Minimum number of similar memories to form a pattern (default: 3)"
-                    }
-                },
-                "required": ["topic"]
-            }
-        }),
-        json!({
-            "name": "icm_memoir_search_all",
-            "description": "Full-text search concepts across all memoirs.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "default": 10,
-                        "description": "Max results"
-                    }
-                },
-                "required": ["query"]
-            }
-        }),
+                    "required": ["query"]
+                }
+            }),
+            ToolAnnotations::new(true, false, true, false),
+            |context, args| tool_memoir_search_all(context.store, args)
+        ),
         // --- Feedback tools ---
-        json!({
-            "name": "icm_feedback_record",
-            "description": "Record a correction/feedback when an AI prediction was wrong. Helps improve future predictions by learning from mistakes.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "topic": {
-                        "type": "string",
-                        "description": "Category/namespace for this feedback (e.g. 'triage-owner/repo', 'pr-analysis')"
+        tool_spec!(
+            FeedbackRecordInput,
+            json!({
+                "name": "icm_feedback_record",
+                "description": "Record a correction/feedback when an AI prediction was wrong. Helps improve future predictions by learning from mistakes.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {
+                            "type": "string",
+                            "description": "Category/namespace for this feedback (e.g. 'triage-owner/repo', 'pr-analysis')"
+                        },
+                        "context": {
+                            "type": "string",
+                            "description": "What was the situation / input that led to the prediction"
+                        },
+                        "predicted": {
+                            "type": "string",
+                            "description": "What the AI predicted or did"
+                        },
+                        "corrected": {
+                            "type": "string",
+                            "description": "What the correct answer/action should have been"
+                        },
+                        "reason": {
+                            "type": "string",
+                            "description": "Why the correction was made (optional)"
+                        },
+                        "source": {
+                            "type": "string",
+                            "description": "Which tool/pipeline generated the prediction (optional)"
+                        }
                     },
-                    "context": {
-                        "type": "string",
-                        "description": "What was the situation / input that led to the prediction"
+                    "required": ["topic", "context", "predicted", "corrected"]
+                }
+            }),
+            requirements: ToolRequirements::STORE.with_optional_embedder(),
+            ToolAnnotations::new(false, false, false, false),
+            |context, args| tool_feedback_record(
+                context.store,
+                context.embedder,
+                args,
+                context.compact
+            )
+        ),
+        tool_spec!(
+            FeedbackSearchInput,
+            json!({
+                "name": "icm_feedback_search",
+                "description": "Search past feedback/corrections to inform current predictions. Use before making predictions to learn from past mistakes.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "Search query to find relevant past corrections"
+                        },
+                        "topic": {
+                            "type": "string",
+                            "description": "Filter by topic (optional)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "default": 5,
+                            "minimum": 1,
+                            "maximum": 20,
+                            "description": "Max number of results"
+                        }
                     },
-                    "predicted": {
-                        "type": "string",
-                        "description": "What the AI predicted or did"
-                    },
-                    "corrected": {
-                        "type": "string",
-                        "description": "What the correct answer/action should have been"
-                    },
-                    "reason": {
-                        "type": "string",
-                        "description": "Why the correction was made (optional)"
-                    },
-                    "source": {
-                        "type": "string",
-                        "description": "Which tool/pipeline generated the prediction (optional)"
-                    }
-                },
-                "required": ["topic", "context", "predicted", "corrected"]
-            }
-        }),
-        json!({
-            "name": "icm_feedback_search",
-            "description": "Search past feedback/corrections to inform current predictions. Use before making predictions to learn from past mistakes.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "Search query to find relevant past corrections"
-                    },
-                    "topic": {
-                        "type": "string",
-                        "description": "Filter by topic (optional)"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "default": 5,
-                        "minimum": 1,
-                        "maximum": 20,
-                        "description": "Max number of results"
-                    }
-                },
-                "required": ["query"]
-            }
-        }),
-        json!({
-            "name": "icm_feedback_stats",
-            "description": "Get feedback statistics: total count, breakdown by topic, most applied corrections.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {}
-            }
-        }),
+                    "required": ["query"]
+                }
+            }),
+            requirements: ToolRequirements::STORE.with_optional_embedder(),
+            ToolAnnotations::new(true, false, true, false),
+            |context, args| tool_feedback_search(context.store, context.embedder, args)
+        ),
+        tool_spec!(
+            FeedbackStatsInput,
+            json!({
+                "name": "icm_feedback_stats",
+                "description": "Get feedback statistics: total count, breakdown by topic, most applied corrections.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }),
+            ToolAnnotations::new(true, false, true, false),
+            |context, _| tool_feedback_stats(context.store)
+        ),
         // --- Transcript tools (verbatim session replay) ---
-        json!({
-            "name": "icm_transcript_start_session",
-            "description": "Create a new transcript session for verbatim message capture. Returns the session_id used by subsequent icm_transcript_record calls. Use once per conversation or debugging session.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "agent": {
-                        "type": "string",
-                        "description": "Agent identifier (e.g. 'claude-code', 'cursor', 'gemini-cli'). Default: 'mcp'."
-                    },
-                    "project": {
-                        "type": "string",
-                        "description": "Project name (optional; usually cwd basename or repo slug)"
-                    },
-                    "metadata": {
-                        "type": "string",
-                        "description": "Arbitrary JSON metadata (optional)"
+        tool_spec!(
+            TranscriptStartInput,
+            json!({
+                "name": "icm_transcript_start_session",
+                "description": "Create a new transcript session for verbatim message capture. Returns the session_id used by subsequent icm_transcript_record calls. Use once per conversation or debugging session.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "agent": {
+                            "type": "string",
+                            "description": "Agent identifier (e.g. 'claude-code', 'cursor', 'gemini-cli'). Default: 'mcp'."
+                        },
+                        "project": {
+                            "type": "string",
+                            "description": "Project name (optional; usually cwd basename or repo slug)"
+                        },
+                        "metadata": {
+                            "type": "string",
+                            "description": "Arbitrary JSON metadata (optional)"
+                        }
                     }
                 }
-            }
-        }),
-        json!({
-            "name": "icm_transcript_record",
-            "description": "Append a verbatim message to a transcript session. Stores the raw content with no summarization. Use once per user turn, assistant reply, or tool call for full replay fidelity.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "session_id": {
-                        "type": "string",
-                        "description": "Session id from icm_transcript_start_session"
+            }),
+            ToolAnnotations::new(false, false, false, false),
+            |context, args| tool_transcript_start_session(context.store, args)
+        ),
+        tool_spec!(
+            TranscriptRecordInput,
+            json!({
+                "name": "icm_transcript_record",
+                "description": "Append a verbatim message to a transcript session. Stores the raw content with no summarization. Use once per user turn, assistant reply, or tool call for full replay fidelity.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": {
+                            "type": "string",
+                            "description": "Session id from icm_transcript_start_session"
+                        },
+                        "role": {
+                            "type": "string",
+                            "enum": ["user", "assistant", "system", "tool"],
+                            "description": "Message role"
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Raw message content (stored verbatim)"
+                        },
+                        "tool_name": {
+                            "type": "string",
+                            "description": "Tool name if role=tool (optional)"
+                        },
+                        "tokens": {
+                            "type": "integer",
+                            "description": "Token count for billing / stats (optional)"
+                        },
+                        "metadata": {
+                            "type": "string",
+                            "description": "Arbitrary JSON metadata (optional)"
+                        }
                     },
-                    "role": {
-                        "type": "string",
-                        "enum": ["user", "assistant", "system", "tool"],
-                        "description": "Message role"
+                    "required": ["session_id", "role", "content"]
+                }
+            }),
+            ToolAnnotations::new(false, false, false, false),
+            |context, args| tool_transcript_record(context.store, args)
+        ),
+        tool_spec!(
+            TranscriptSearchInput,
+            json!({
+                "name": "icm_transcript_search",
+                "description": "Full-text search across recorded transcript messages (FTS5 BM25). Supports boolean operators, phrase matches, and prefix queries. Use to recall exact quotes or debug past decisions.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "query": {
+                            "type": "string",
+                            "description": "FTS5 query: 'postgres OR mysql', '\"exact phrase\"', 'auth*'"
+                        },
+                        "session_id": {
+                            "type": "string",
+                            "description": "Restrict to one session (optional)"
+                        },
+                        "project": {
+                            "type": "string",
+                            "description": "Restrict to one project (optional)"
+                        },
+                        "limit": {
+                            "type": "integer",
+                            "default": 10,
+                            "minimum": 1,
+                            "maximum": 50
+                        }
                     },
-                    "content": {
-                        "type": "string",
-                        "description": "Raw message content (stored verbatim)"
+                    "required": ["query"]
+                }
+            }),
+            ToolAnnotations::new(true, false, true, false),
+            |context, args| tool_transcript_search(context.store, args)
+        ),
+        tool_spec!(
+            TranscriptShowInput,
+            json!({
+                "name": "icm_transcript_show",
+                "description": "Replay the full message thread of a transcript session, chronologically. Returns up to `limit` messages with role, content, tool name, timestamp.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "session_id": { "type": "string" },
+                        "limit": { "type": "integer", "default": 200, "minimum": 1, "maximum": 2000 }
                     },
-                    "tool_name": {
-                        "type": "string",
-                        "description": "Tool name if role=tool (optional)"
-                    },
-                    "tokens": {
-                        "type": "integer",
-                        "description": "Token count for billing / stats (optional)"
-                    },
-                    "metadata": {
-                        "type": "string",
-                        "description": "Arbitrary JSON metadata (optional)"
-                    }
-                },
-                "required": ["session_id", "role", "content"]
-            }
-        }),
-        json!({
-            "name": "icm_transcript_search",
-            "description": "Full-text search across recorded transcript messages (FTS5 BM25). Supports boolean operators, phrase matches, and prefix queries. Use to recall exact quotes or debug past decisions.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": {
-                        "type": "string",
-                        "description": "FTS5 query: 'postgres OR mysql', '\"exact phrase\"', 'auth*'"
-                    },
-                    "session_id": {
-                        "type": "string",
-                        "description": "Restrict to one session (optional)"
-                    },
-                    "project": {
-                        "type": "string",
-                        "description": "Restrict to one project (optional)"
-                    },
-                    "limit": {
-                        "type": "integer",
-                        "default": 10,
-                        "minimum": 1,
-                        "maximum": 50
-                    }
-                },
-                "required": ["query"]
-            }
-        }),
-        json!({
-            "name": "icm_transcript_show",
-            "description": "Replay the full message thread of a transcript session, chronologically. Returns up to `limit` messages with role, content, tool name, timestamp.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "session_id": { "type": "string" },
-                    "limit": { "type": "integer", "default": 200, "minimum": 1, "maximum": 2000 }
-                },
-                "required": ["session_id"]
-            }
-        }),
-        json!({
-            "name": "icm_transcript_stats",
-            "description": "Global transcript statistics: session count, message count, total bytes, breakdown by role and agent, top sessions by message count.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {}
-            }
-        }),
-        json!({
-            "name": "icm_wake_up",
-            "description": "Build a compact critical-facts pack for LLM system-prompt injection. Selects critical/high memories (and preferences) optionally scoped by project, ranks by importance × recency × weight, and truncates to a token budget. Use at session start to hydrate an agent with the most load-bearing context.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "project": {
-                        "type": "string",
-                        "description": "Project name filter (substring match against topic). Preferences/identity memories are always included."
-                    },
-                    "max_tokens": {
-                        "type": "integer",
-                        "default": 200,
-                        "minimum": 20,
-                        "maximum": 4000,
-                        "description": "Approximate token budget (1 token ≈ 4 characters)"
-                    },
-                    "format": {
-                        "type": "string",
-                        "enum": ["markdown", "plain"],
-                        "default": "markdown",
-                        "description": "Output format"
-                    },
-                    "include_preferences": {
-                        "type": "boolean",
-                        "default": true,
-                        "description": "Include global preferences/identity memories regardless of the project filter"
+                    "required": ["session_id"]
+                }
+            }),
+            ToolAnnotations::new(true, false, true, false),
+            |context, args| tool_transcript_show(context.store, args)
+        ),
+        tool_spec!(
+            TranscriptStatsInput,
+            json!({
+                "name": "icm_transcript_stats",
+                "description": "Global transcript statistics: session count, message count, total bytes, breakdown by role and agent, top sessions by message count.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {}
+                }
+            }),
+            ToolAnnotations::new(true, false, true, false),
+            |context, _| tool_transcript_stats(context.store)
+        ),
+        tool_spec!(
+            WakeUpInput,
+            json!({
+                "name": "icm_wake_up",
+                "description": "Build a compact critical-facts pack for LLM system-prompt injection. Selects critical/high memories (and preferences) optionally scoped by project, ranks by importance × recency × weight, and truncates to a token budget. Use at session start to hydrate an agent with the most load-bearing context.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "project": {
+                            "type": "string",
+                            "description": "Project name filter (substring match against topic). Preferences/identity memories are always included."
+                        },
+                        "max_tokens": {
+                            "type": "integer",
+                            "default": 200,
+                            "minimum": 20,
+                            "maximum": 4000,
+                            "description": "Approximate token budget (1 token ≈ 4 characters)"
+                        },
+                        "format": {
+                            "type": "string",
+                            "enum": ["markdown", "plain"],
+                            "default": "markdown",
+                            "description": "Output format"
+                        },
+                        "include_preferences": {
+                            "type": "boolean",
+                            "default": true,
+                            "description": "Include global preferences/identity memories regardless of the project filter"
+                        }
                     }
                 }
-            }
-        }),
+            }),
+            ToolAnnotations::new(true, false, true, false),
+            |context, args| tool_wake_up(context.store, args)
+        ),
+        tool_spec!(
+            EmbedAllInput,
+            json!({
+                "name": "icm_memory_embed_all",
+                "description": "Generate embeddings for all memories that don't have one yet. Use this to backfill vector search capability.",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "topic": {
+                            "type": "string",
+                            "description": "Only embed memories in this topic (optional)"
+                        }
+                    }
+                }
+            }),
+            requirements: ToolRequirements::STORE.with_required_embedder(),
+            ToolAnnotations::new(false, false, true, false),
+            |context, args| tool_embed_all(context.store, context.embedder, args)
+        ),
     ];
 
-    if has_embedder {
-        tools.push(json!({
-            "name": "icm_memory_embed_all",
-            "description": "Generate embeddings for all memories that don't have one yet. Use this to backfill vector search capability.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "topic": {
-                        "type": "string",
-                        "description": "Only embed memories in this topic (optional)"
-                    }
-                }
-            }
-        }));
-    }
-
-    json!({ "tools": tools })
+    ToolCatalog::new(tools, has_embedder).expect("static MCP tool registrations must be valid")
 }
 
 // ---------------------------------------------------------------------------
 // Tool dispatch
 // ---------------------------------------------------------------------------
+
+/// Frozen 2024 tool-list projection retained for callers and compatibility
+/// tests. Production service instances cache this projection in their catalog.
+pub fn tool_definitions(has_embedder: bool) -> Value {
+    build_catalog(has_embedder).legacy_list()
+}
 
 pub fn call_tool(
     store: &Store,
@@ -781,45 +1068,32 @@ pub fn call_tool_with_config(
     compact: bool,
     auto_consolidate: AutoConsolidate,
 ) -> ToolResult {
-    match name {
-        // Memory tools
-        "icm_memory_store" => tool_store(store, embedder, args, compact, auto_consolidate),
-        "icm_memory_recall" => tool_recall(store, embedder, args, compact),
-        "icm_memory_forget" => tool_forget(store, args),
-        "icm_memory_forget_topic" => tool_forget_topic(store, args),
-        "icm_memory_update" => tool_update(store, embedder, args),
-        "icm_memory_consolidate" => tool_consolidate(store, embedder, args),
-        "icm_memory_list_topics" => tool_list_topics(store),
-        "icm_memory_stats" => tool_stats(store),
-        "icm_memory_health" => tool_health(store, args),
-        "icm_memory_extract_patterns" => tool_extract_patterns(store, args),
-        "icm_memory_embed_all" => tool_embed_all(store, embedder, args),
-        // Memoir tools
-        "icm_memoir_create" => tool_memoir_create(store, args),
-        "icm_memoir_list" => tool_memoir_list(store),
-        "icm_memoir_show" => tool_memoir_show(store, args),
-        "icm_memoir_add_concept" => tool_memoir_add_concept(store, args),
-        "icm_memoir_refine" => tool_memoir_refine(store, args),
-        "icm_memoir_search" => tool_memoir_search(store, args),
-        "icm_memoir_search_all" => tool_memoir_search_all(store, args),
-        "icm_memoir_link" => tool_memoir_link(store, args),
-        "icm_memoir_inspect" => tool_memoir_inspect(store, args),
-        "icm_memoir_export" => tool_memoir_export(store, args),
-        // Learn tool
-        "icm_learn" => tool_learn(store, args),
-        // Feedback tools
-        "icm_feedback_record" => tool_feedback_record(store, embedder, args, compact),
-        "icm_feedback_search" => tool_feedback_search(store, embedder, args),
-        "icm_feedback_stats" => tool_feedback_stats(store),
-        // Transcript tools
-        "icm_transcript_start_session" => tool_transcript_start_session(store, args),
-        "icm_transcript_record" => tool_transcript_record(store, args),
-        "icm_transcript_search" => tool_transcript_search(store, args),
-        "icm_transcript_show" => tool_transcript_show(store, args),
-        "icm_transcript_stats" => tool_transcript_stats(store),
-        // Wake-up tool
-        "icm_wake_up" => tool_wake_up(store, args),
-        _ => ToolResult::error(format!("unknown tool: {name}")),
+    // This public helper is the frozen pre-catalog compatibility dispatcher.
+    // Keep unavailable tools dispatchable here so their established handler
+    // errors remain stable; production service discovery and dispatch use the
+    // capability-filtered catalog stored by `McpService`.
+    let catalog = build_catalog(true);
+    let working_directory =
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    let context = ToolContext {
+        store,
+        embedder,
+        compact,
+        auto_consolidate,
+        working_directory: &working_directory,
+        enforce_directory_boundary: false,
+    };
+    match catalog.dispatch(
+        &context,
+        name,
+        args,
+        crate::catalog::InputValidation::Legacy2024Unchecked,
+    ) {
+        DispatchResult::ToolResult(result) => result,
+        DispatchResult::UnknownTool => ToolResult::error(format!("unknown tool: {name}")),
+        DispatchResult::InvalidInput(_) => {
+            unreachable!("unchecked legacy compatibility dispatch cannot reject typed inputs")
+        }
     }
 }
 
@@ -1012,13 +1286,13 @@ fn tool_store(
     // Input length validation
     if topic.len() > MAX_TOPIC_LEN {
         return ToolResult::error(format!(
-            "topic exceeds maximum length ({} > {MAX_TOPIC_LEN} chars)",
+            "topic exceeds maximum length ({} > {MAX_TOPIC_LEN} UTF-8 bytes)",
             topic.len()
         ));
     }
     if content.len() > MAX_CONTENT_LEN {
         return ToolResult::error(format!(
-            "content exceeds maximum length ({} > {MAX_CONTENT_LEN} chars)",
+            "content exceeds maximum length ({} > {MAX_CONTENT_LEN} UTF-8 bytes)",
             content.len()
         ));
     }
@@ -1255,9 +1529,10 @@ fn tool_recall(
         Some(q) => q,
         None => return ToolResult::error("missing required field: query".into()),
     };
-    // Clamp to the schema's advertised maximum (20) — the code previously
-    // accepted up to 100, silently diverging from the published contract.
-    let limit = get_i64(args, "limit", 5).clamp(1, 20) as usize;
+    // The modern input contract extends the historical advertised maximum
+    // from 20 to the frozen Phase 2 boundary of 100. Keep the handler cap in
+    // lockstep so valid modern calls are not silently truncated.
+    let limit = get_i64(args, "limit", 5).clamp(1, 100) as usize;
     let topic = get_str(args, "topic");
     let keyword = get_str(args, "keyword");
 
@@ -1452,6 +1727,41 @@ fn tool_learn(store: &Store, args: &Value) -> ToolResult {
         Ok(result) => ToolResult::text(result.to_string()),
         Err(e) => ToolResult::error(format!("learn failed: {e}")),
     }
+}
+
+fn tool_learn_bounded(context: &ToolContext<'_>, args: &Value) -> ToolResult {
+    if !context.enforce_directory_boundary {
+        return tool_learn(context.store, args);
+    }
+    let requested = get_str(args, "directory").unwrap_or(".");
+    let requested = std::path::Path::new(requested);
+    let candidate = if requested.is_absolute() {
+        requested.to_path_buf()
+    } else {
+        context.working_directory.join(requested)
+    };
+    let root = match context.working_directory.canonicalize() {
+        Ok(root) => root,
+        Err(_) => {
+            return ToolResult::error(
+                "server working directory could not be resolved safely".into(),
+            )
+        }
+    };
+    let candidate = match candidate.canonicalize() {
+        Ok(candidate) => candidate,
+        Err(_) => {
+            return ToolResult::error(format!("directory not found: {}", candidate.display()))
+        }
+    };
+    if !candidate.starts_with(&root) {
+        return ToolResult::error(
+            "directory must remain within the server working directory".into(),
+        );
+    }
+    let mut bounded_args = args.clone();
+    bounded_args["directory"] = Value::String(candidate.to_string_lossy().into_owned());
+    tool_learn(context.store, &bounded_args)
 }
 
 fn tool_consolidate(store: &Store, embedder: Option<&dyn Embedder>, args: &Value) -> ToolResult {
@@ -1779,12 +2089,15 @@ fn tool_memoir_create(store: &Store, args: &Value) -> ToolResult {
         None => return ToolResult::error("missing required field: name".into()),
     };
     if name.len() > 255 {
-        return ToolResult::error(format!("name too long: {} chars (max 255)", name.len()));
+        return ToolResult::error(format!(
+            "name too long: {} UTF-8 bytes (max 255)",
+            name.len()
+        ));
     }
     let description = get_str(args, "description").unwrap_or("");
     if description.len() > 10_000 {
         return ToolResult::error(format!(
-            "description too long: {} chars (max 10000)",
+            "description too long: {} UTF-8 bytes (max 10000)",
             description.len()
         ));
     }
@@ -1886,7 +2199,7 @@ fn tool_memoir_add_concept(store: &Store, args: &Value) -> ToolResult {
     };
     if name.len() > 255 {
         return ToolResult::error(format!(
-            "concept name too long: {} chars (max 255)",
+            "concept name too long: {} UTF-8 bytes (max 255)",
             name.len()
         ));
     }
@@ -1896,7 +2209,7 @@ fn tool_memoir_add_concept(store: &Store, args: &Value) -> ToolResult {
     };
     if definition.len() > 10_000 {
         return ToolResult::error(format!(
-            "definition too long: {} chars (max 10000)",
+            "definition too long: {} UTF-8 bytes (max 10000)",
             definition.len()
         ));
     }
@@ -1932,13 +2245,19 @@ fn tool_memoir_refine(store: &Store, args: &Value) -> ToolResult {
         Some(n) => n,
         None => return ToolResult::error("missing required field: name".into()),
     };
+    if name.len() > 255 {
+        return ToolResult::error(format!(
+            "concept name too long: {} UTF-8 bytes (max 255)",
+            name.len()
+        ));
+    }
     let definition = match get_str(args, "definition") {
         Some(d) => d,
         None => return ToolResult::error("missing required field: definition".into()),
     };
     if definition.len() > 10_000 {
         return ToolResult::error(format!(
-            "definition too long: {} chars (max 10000)",
+            "definition too long: {} UTF-8 bytes (max 10000)",
             definition.len()
         ));
     }
@@ -2424,7 +2743,7 @@ fn tool_feedback_record(
     ] {
         if field_value.len() > MAX_FEEDBACK_FIELD_LEN {
             return ToolResult::error(format!(
-                "{field_name} exceeds maximum length ({} > {MAX_FEEDBACK_FIELD_LEN} chars)",
+                "{field_name} exceeds maximum length ({} > {MAX_FEEDBACK_FIELD_LEN} UTF-8 bytes)",
                 field_value.len()
             ));
         }
@@ -2666,6 +2985,21 @@ mod tests {
     }
 
     #[test]
+    fn embed_all_without_embedder_preserves_legacy_handler_error() {
+        let store = test_store();
+        let listed = tool_definitions(false);
+        assert!(!listed["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|tool| tool["name"] == "icm_memory_embed_all"));
+
+        let result = call_tool(&store, None, "icm_memory_embed_all", &json!({}), false);
+        assert!(result.is_error);
+        assert_eq!(result.content[0].text, "embeddings not available");
+    }
+
+    #[test]
     fn test_store_missing_topic() {
         let store = test_store();
         let result = call_tool(
@@ -2795,37 +3129,41 @@ mod tests {
         );
     }
 
-    /// Audit regression: the schema advertises limit <= 20 but the code
-    /// accepted 100 — the clamp must match the published contract.
+    /// The public helper remains the frozen unchecked 2024 compatibility
+    /// dispatch, including its historical lower and upper recall clamps.
     #[test]
-    fn test_recall_limit_clamped_to_schema_max() {
+    fn test_legacy_call_tool_recall_limits_remain_unchecked_and_clamped() {
         let store = test_store();
+        let consolidation_off = AutoConsolidate {
+            enabled: false,
+            threshold: 10,
+        };
         for i in 0..30 {
-            let r = call_tool(
+            let r = call_tool_with_config(
                 &store,
                 None,
                 "icm_memory_store",
                 &json!({"topic": "t", "content": format!("clamp probe entry number {i}")}),
                 false,
+                consolidation_off,
             );
             assert!(!r.is_error);
         }
-        let recall_result = call_tool(
-            &store,
-            None,
-            "icm_memory_recall",
-            &json!({"query": "clamp probe entry", "project": "", "limit": 100}),
-            false,
-        );
-        assert!(!recall_result.is_error);
-        let hits = recall_result.content[0]
-            .text
-            .matches("clamp probe entry")
-            .count();
-        assert!(
-            hits <= 20,
-            "limit must clamp to the schema max of 20, got {hits} hits"
-        );
+        for (limit, expected_hits) in [(0, 1), (100, 20), (101, 20)] {
+            let recall_result = call_tool(
+                &store,
+                None,
+                "icm_memory_recall",
+                &json!({"query": "clamp probe entry", "project": "", "limit": limit}),
+                false,
+            );
+            assert!(!recall_result.is_error);
+            let hits = recall_result.content[0]
+                .text
+                .matches("clamp probe entry")
+                .count();
+            assert_eq!(hits, expected_hits);
+        }
     }
 
     /// Audit regression: filtering was previously applied AFTER the store

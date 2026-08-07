@@ -301,7 +301,7 @@ pub(crate) fn build_catalog(has_embedder: bool) -> ToolCatalog {
             legacy_normalizer: normalize_legacy_recall_input,
             requirements: ToolRequirements::STORE.with_optional_embedder(),
             ToolAnnotations::new(false, true, false, false),
-            |context, args| tool_recall(context.store, context.embedder, args, context.compact)
+            tool_recall
         ),
         tool_spec!(
             MemoryForgetInput,
@@ -1514,12 +1514,10 @@ fn format_memory_output(memories: &[(Memory, f32)], compact: bool) -> String {
     output
 }
 
-fn tool_recall(
-    store: &Store,
-    embedder: Option<&dyn Embedder>,
-    args: &Value,
-    compact: bool,
-) -> ToolResult {
+fn tool_recall(context: &ToolContext<'_>, args: &Value) -> ToolResult {
+    let store = context.store;
+    let embedder = context.embedder;
+    let compact = context.compact;
     // Auto-decay if >24h since last decay
     if let Err(e) = store.maybe_auto_decay() {
         tracing::warn!(error = %e, "auto-decay failed during recall");
@@ -1544,9 +1542,8 @@ fn tool_recall(
     // (git remote first) — the CLI hooks store under that name, so a raw
     // cwd basename would silently miss on renamed checkouts (audit finding).
     let project_arg = get_str(args, "project");
-    let cwd_project = std::env::current_dir()
-        .ok()
-        .and_then(|p| icm_core::project::project_from_path(&p.to_string_lossy()));
+    let cwd_project =
+        icm_core::project::project_from_path(&context.working_directory.to_string_lossy());
     let project: Option<String> = match project_arg {
         Some("") => None,
         Some(p) => Some(p.to_string()),

@@ -69,6 +69,9 @@ pub fn verify(suite_root: &Path) -> Result<DesignVerification> {
         .get("designVersion")
         .and_then(Value::as_u64)
         .context("missing designVersion")?;
+    if design_version != 8 {
+        anyhow::bail!("expected preregistration designVersion 8");
+    }
 
     verify_environment(&design)?;
     let fixture_hashes = verify_fixture_hashes(suite_root)?;

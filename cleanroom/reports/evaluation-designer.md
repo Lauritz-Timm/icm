@@ -54,7 +54,7 @@ observable equality of a real candidate probe under spaces and Unicode roots.
 The `self-test` command also runs the complete suite under both roots and
 requires byte-identical normalized reports.
 
-Suite, work, and evidence roots are resolved before use, must be pairwise
+Candidate, suite, work, and evidence roots are resolved before use, must be pairwise
 disjoint strict children of the explicit workspace, and may not overlap real
 user-state roots. Every scenario gets a fresh synthetic home, XDG tree,
 Windows profile/app-data tree, temp tree, database, configuration, cwd, and

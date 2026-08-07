@@ -6,7 +6,7 @@ The committed preregistration is the contract; the runner invokes a real ICM
 binary and records real wire responses, synthetic-tree mutations, configured
 loopback HTTP integration traffic, and process topology.
 
-The required lane is deliberately portable and hermetic:
+The required lane provides portable controlled-input isolation:
 
 - every scenario receives a new synthetic home, XDG tree, Windows profile
   tree, database, configuration tree, working directory, and environment;
@@ -35,35 +35,35 @@ normal workspace build:
 ```text
 cargo build --locked --offline
 cargo run --locked --offline -- verify-design --suite-root .
-cargo run --locked --offline -- self-test \
-  --workspace-root /path/to/icm-workspace \
-  --suite-root /path/to/icm-workspace/cleanroom/eval \
-  --candidate /path/to/icm-workspace/target/debug/icm \
-  --work-root /path/to/icm-workspace/.cleanroom-eval-runs/self-test \
-  --evidence-root /path/to/icm-workspace/.cleanroom-eval-evidence
+cargo run --locked --offline -- self-test --expect baseline \
+  --workspace-root /path/to/dedicated-eval-workspace \
+  --suite-root /path/to/dedicated-eval-workspace/suite \
+  --candidate /path/to/dedicated-eval-workspace/candidate/icm \
+  --work-root /path/to/dedicated-eval-workspace/runs/self-test \
+  --evidence-root /path/to/dedicated-eval-workspace/evidence
 
 cargo run --locked --offline -- record-baseline \
-  --workspace-root /path/to/icm-workspace \
-  --suite-root /path/to/icm-workspace/cleanroom/eval \
-  --candidate /path/to/icm-workspace/target/debug/icm \
-  --work-root /path/to/icm-workspace/.cleanroom-eval-runs/baseline \
-  --evidence-root /path/to/icm-workspace/.cleanroom-eval-evidence \
+  --workspace-root /path/to/dedicated-eval-workspace \
+  --suite-root /path/to/dedicated-eval-workspace/suite \
+  --candidate /path/to/dedicated-eval-workspace/candidate/icm \
+  --work-root /path/to/dedicated-eval-workspace/runs/baseline \
+  --evidence-root /path/to/dedicated-eval-workspace/evidence \
   --run-label untouched-develop
 
 cargo run --locked --offline -- run \
-  --workspace-root /path/to/icm-workspace \
-  --suite-root /path/to/icm-workspace/cleanroom/eval \
-  --candidate /path/to/replacement/icm \
-  --work-root /path/to/icm-workspace/.cleanroom-eval-runs/candidate \
-  --evidence-root /path/to/icm-workspace/.cleanroom-eval-evidence \
+  --workspace-root /path/to/dedicated-eval-workspace \
+  --suite-root /path/to/dedicated-eval-workspace/suite \
+  --candidate /path/to/dedicated-eval-workspace/candidate/icm \
+  --work-root /path/to/dedicated-eval-workspace/runs/candidate \
+  --evidence-root /path/to/dedicated-eval-workspace/evidence \
   --run-label replacement
 ```
 
 All paths may be relative or absolute. The runner resolves them before
-creation. Suite, work, and evidence must be pairwise-disjoint strict children
-of the explicit workspace root. The workspace may be a dedicated project
-below `HOME`, but it may not equal `HOME`/`USERPROFILE` or lie within inherited
-or standard-default XDG, app-data, or macOS Library state directories.
+creation. Candidate, suite, work, and evidence must be disjoint strict
+children of a dedicated, non-Git workspace. The workspace may be below
+`HOME`, but it may not equal `HOME`/`USERPROFILE` or lie within inherited or
+standard-default XDG, app-data, or macOS Library state directories.
 Candidate environments, arguments, and working directories are checked not to
 receive those real-state locations. Normalized output stores placeholders.
 
@@ -79,9 +79,3 @@ artifact but never silently updates the committed SHA-256 golden contract.
 Updating a golden requires an explicit reviewed file change. `run` enforces
 all candidate gates and exits unsuccessfully if a capability is missing or a
 scenario fails.
-
-The `archive` command copies the evaluator and configured evidence tree to a
-new output root and writes `MANIFEST.sha256`. It refuses to overwrite an
-existing archive, requires suite/evidence/report/output to be pairwise
-disjoint before creating output, and excludes only evaluator build/run scratch
-directories.

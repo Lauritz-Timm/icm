@@ -212,18 +212,6 @@
   "manifestSchema": {
     "currentVersion": 2,
     "topLevelOwnershipField": "providerOwnership",
-    "requiredOwnershipFields": [
-      "provider",
-      "scope",
-      "configPath",
-      "surface",
-      "rule",
-      "preexisting",
-      "owned",
-      "beforeHash",
-      "afterHash",
-      "writtenAt",
-      "writerVersion"
-    ]
+    "producerVersion": "icm-provider-engine-v2"
   }
 }

@@ -7,9 +7,16 @@ binary and records real wire responses, synthetic-tree mutations, configured
 loopback HTTP integration traffic, and process topology.
 
 The initial design was frozen on 2026-08-05 before replacement implementation.
-Later revisions, including v9, are post-implementation audit/spec corrections;
-v9 was frozen before the final candidate run. Its provider/OpenCode and HTTP
-session/Origin corrections did not change the 294 scenarios or thresholds.
+Later revisions are post-implementation audit/spec corrections. v9 was frozen
+before the initial final-candidate run. That run exposed stale evaluator-only
+provider journal and revision-sensitive proxy-header assumptions. v10 fixes
+those assumptions and closes provider-state, Git-ancestry, and cross-scenario
+canary gaps before the corrected candidate run. Its first two-root self-test
+then exposed three stale modern text-ULID normalization rules; v11 removes
+them because modern IDs live in `structuredContent` and concise text does not
+duplicate them. Its completed two-root diff then identified the remaining
+dynamic structured IDs and timestamps; v12 declares only those exact pointers.
+The 294 scenarios and all thresholds remain unchanged.
 The pre-implementation upstream observation remains frozen in
 `goldens/baseline-metrics.json`, including its source commit and candidate
 binary hash.
@@ -24,9 +31,11 @@ The required lane provides portable controlled-input isolation:
 - no provider account, credential, real configuration, Git configuration,
   external service, fixed port, shell, `/tmp`, or host-specific absolute path
   is used;
+- the dedicated workspace is rejected beneath inherited provider state or any
+  Git worktree ancestor;
 - fixture hashes are verified, and each high-entropy deterministic canary is
-  checked for integrity and absence from captures and the entire scenario
-  tree;
+  checked after every scenario for integrity and absence from captures and
+  newly created scenario trees;
 - candidate commands and the mock daemon are owned by timeout-bounded RAII
   guards that kill and reap children on success, error, and timeout;
 - the normalized suite is run under two distinct roots (one with spaces and

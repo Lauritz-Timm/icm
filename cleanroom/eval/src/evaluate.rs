@@ -1178,6 +1178,7 @@ impl Runner {
         let mut before = read_document_set(scope, &document_paths)?;
         let mut watched_before = read_path_set(&watched_paths)?;
         let manifest_path = provider_manifest_path(&sandbox, fixture)?;
+        seed_provider_manifest(&manifest_path)?;
         let manifest_before = fs::read(&manifest_path).ok();
 
         let mut commands: Vec<(&str, bool)> = match case_id {
@@ -1186,9 +1187,7 @@ impl Runner {
             "idempotent-reapply" => vec![("trust", true), ("trust", true)],
             "strip-owned-values-only" => vec![("trust", true), ("strip", true)],
             "uninstall-owned-values-only" => vec![("trust", true), ("uninstall", true)],
-            "shadowing-fails-closed" => {
-                vec![("doctor", true), ("trust", scope.scope == "project-local")]
-            }
+            "shadowing-fails-closed" => vec![("doctor", true), ("trust", false)],
             "normalization-collision-fails-closed" | "ambiguous-path-zero-write" => {
                 vec![("doctor", true), ("trust", false)]
             }
@@ -1210,6 +1209,7 @@ impl Runner {
         let mut command_results = Vec::new();
         let mut server_id = None;
         let mut first_apply = None;
+        let mut trusted_documents = None;
         for (index, (operation, expected_success)) in commands.drain(..).enumerate() {
             let arguments = if operation == "uninstall" {
                 vec![
@@ -1291,6 +1291,14 @@ impl Runner {
                     anyhow::bail!("provider reapply changed document bytes");
                 }
             }
+            if operation == "trust"
+                && matches!(
+                    case_id,
+                    "strip-owned-values-only" | "uninstall-owned-values-only"
+                )
+            {
+                trusted_documents = Some(read_document_set(scope, &document_paths)?);
+            }
             command_results.push(json!({
                 "operation": operation,
                 "arguments": arguments,
@@ -1310,7 +1318,7 @@ impl Runner {
             anyhow::bail!("provider mutation removed an unrelated sentinel");
         }
         let zero_write = case_id == "explicit-opt-in"
-            || (case_id == "shadowing-fails-closed" && scope.scope == "user")
+            || case_id == "shadowing-fails-closed"
             || matches!(
                 case_id,
                 "normalization-collision-fails-closed"
@@ -1334,7 +1342,10 @@ impl Runner {
                         scope,
                         &document_paths,
                         server_id,
-                        fixture,
+                        trusted_documents
+                            .as_ref()
+                            .context("strip/uninstall lacks trusted document state")?,
+                        case_id == "uninstall-owned-values-only",
                     )?;
                 }
                 _ if !zero_write => {
@@ -1366,10 +1377,13 @@ impl Runner {
                     .as_ref()
                     .context("production-default install manifest absent")?,
                 &provider.id,
-                &scope.scope,
+                scope,
                 &document_paths,
                 &fixture.manifest_schema,
-                matches!(case_id, "external-equal-adopted-not-owned"),
+                case_id,
+                server_id
+                    .as_deref()
+                    .context("provider manifest validation lacks serverId")?,
             )?;
         }
         sandbox.verify()?;
@@ -1793,14 +1807,16 @@ impl Runner {
                 }
             }
             "proxy.single-mock-model-load" => {
-                if records.iter().any(|record| {
-                    record.get("modelLoadCount").and_then(Value::as_u64)
-                        != Some(
-                            self.verification
-                                .acceptance_thresholds
-                                .daemon_model_load_count as u64,
-                        )
-                }) {
+                if records.is_empty()
+                    || records.iter().any(|record| {
+                        record.get("modelLoadCount").and_then(Value::as_u64)
+                            != Some(
+                                self.verification
+                                    .acceptance_thresholds
+                                    .daemon_model_load_count as u64,
+                            )
+                    })
+                {
                     anyhow::bail!("mock model loaded more than once");
                 }
             }
@@ -3966,12 +3982,11 @@ fn validate_empty_modern_emissions(
                     anyhow::bail!("empty transcript timestamps are not null");
                 }
             }
-            "icm_feedback_stats" => {
+            "icm_feedback_stats"
                 if structured.get("byTopic") != Some(&json!([]))
-                    || structured.get("mostApplied") != Some(&json!([]))
-                {
-                    anyhow::bail!("empty feedback statistics are inconsistent");
-                }
+                    || structured.get("mostApplied") != Some(&json!([])) =>
+            {
+                anyhow::bail!("empty feedback statistics are inconsistent");
             }
             _ => {}
         }
@@ -5072,6 +5087,29 @@ fn provider_manifest_path_for_platform(
     Ok(root.join(native_relative(&spec.relative_path)))
 }
 
+fn seed_provider_manifest(path: &Path) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let manifest = json!({
+        "schema_version": 2,
+        "icm_version": "0.0.0",
+        "updated_at": "2026-08-09T00:00:00Z",
+        "entries": [],
+        "providerOwnership": {
+            "schema_version": 2,
+            "min_reader_version": 2,
+            "producer_version": "icm-provider-engine-v2",
+            "generation": 0,
+            "installation_id": "icmprovider20260809",
+            "operations": [],
+            "owned_fragments": []
+        }
+    });
+    fs::write(path, serde_json::to_vec_pretty(&manifest)?)?;
+    Ok(())
+}
+
 fn prepare_provider_adversary(
     case_id: &str,
     provider: &str,
@@ -5139,6 +5177,7 @@ fn read_path_set(paths: &[PathBuf]) -> Result<BTreeMap<String, Vec<u8>>> {
         .collect()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn seed_dynamic_provider_adversary(
     case_id: &str,
     provider: &ProviderCase,
@@ -5291,7 +5330,7 @@ fn seed_provider_values(
                             .context("mcpServers is not an object")?
                             .insert(
                                 (*server_id).to_owned(),
-                                json!({"command":candidate.to_string_lossy(),"args":["serve"]}),
+                                canonical_json_registration(provider, candidate)?,
                             );
                     }
                     "opencode" => {
@@ -5317,7 +5356,7 @@ fn seed_provider_values(
                             .context("Zed context_servers is not an object")?
                             .insert(
                                 (*server_id).to_owned(),
-                                json!({"command":candidate.to_string_lossy(),"args":["serve"]}),
+                                canonical_json_registration(provider, candidate)?,
                             );
                     }
                     other => anyhow::bail!("unknown JSON provider {other}"),
@@ -5397,6 +5436,17 @@ fn seed_provider_values(
     Ok(())
 }
 
+fn canonical_json_registration(provider: &str, candidate: &Path) -> Result<Value> {
+    let executable = candidate.to_string_lossy();
+    Ok(match provider {
+        "claude-code" | "cursor" => {
+            json!({"type":"stdio","command":executable,"args":["serve"],"env":{}})
+        }
+        "zed" => json!({"command":executable,"args":["serve"],"env":{}}),
+        other => anyhow::bail!("unknown JSON provider {other}"),
+    })
+}
+
 fn hash_document_set(documents: &BTreeMap<String, Vec<u8>>) -> BTreeMap<String, String> {
     documents
         .iter()
@@ -5437,7 +5487,8 @@ fn validate_provider_plan(
             "dialect",
             "serverId",
             "toolRules",
-            "blockingRules",
+            "preservedRestrictions",
+            "causalBlockers",
             "ownershipDisposition",
         ],
         "provider resolved plan",
@@ -5449,7 +5500,8 @@ fn validate_provider_plan(
         "dialect",
         "serverId",
         "toolRules",
-        "blockingRules",
+        "preservedRestrictions",
+        "causalBlockers",
         "ownershipDisposition",
     ] {
         if plan.get(field).is_none() {
@@ -5512,20 +5564,27 @@ fn validate_provider_plan(
     if actual_tool_rules != expected_tool_rules {
         anyhow::bail!("provider plan does not contain the exact two frozen tool rules");
     }
-    let expected_blocking = provider_blocking_rules(&provider.id);
-    let actual_blocking: BTreeSet<_> = plan
-        .get("blockingRules")
+    let expected_restrictions = provider_preserved_restrictions(&provider.id);
+    let actual_restrictions: BTreeSet<_> = plan
+        .get("preservedRestrictions")
         .and_then(Value::as_array)
-        .context("provider plan blockingRules is not an array")?
+        .context("provider plan preservedRestrictions is not an array")?
         .iter()
         .map(|rule| {
             rule.as_str()
-                .context("provider blocking rule is not a string")
+                .context("provider preserved restriction is not a string")
                 .map(str::to_owned)
         })
         .collect::<Result<_>>()?;
-    if actual_blocking != expected_blocking {
-        anyhow::bail!("provider plan blockingRules differ from seeded restrictions");
+    if actual_restrictions != expected_restrictions {
+        anyhow::bail!("provider plan preservedRestrictions differ from seeded restrictions");
+    }
+    let causal_blockers = plan
+        .get("causalBlockers")
+        .and_then(Value::as_array)
+        .context("provider plan causalBlockers is not an array")?;
+    if !causal_blockers.is_empty() {
+        anyhow::bail!("provider plan has unexpected causal blockers for an unseeded server");
     }
     let dispositions = plan
         .get("ownershipDisposition")
@@ -5545,7 +5604,13 @@ fn validate_provider_plan(
         }
         if !matches!(
             object.get("disposition").and_then(Value::as_str),
-            Some("new-owned" | "preexisting-adopted" | "blocked-existing" | "owned-existing")
+            Some(
+                "new-owned"
+                    | "preexisting-adopted"
+                    | "blocked-existing"
+                    | "owned-existing"
+                    | "already-removed"
+            )
         ) {
             anyhow::bail!("ownership disposition uses an unfrozen state");
         }
@@ -5577,7 +5642,12 @@ fn canonical_provider_plan_sha256(
         }
         *path = Value::String(normalize_sandbox_path(resolved, sandbox));
     }
-    for field in ["toolRules", "ownershipDisposition"] {
+    for field in [
+        "toolRules",
+        "preservedRestrictions",
+        "causalBlockers",
+        "ownershipDisposition",
+    ] {
         let value = canonical
             .get_mut(field)
             .with_context(|| format!("canonical provider plan lacks {field}"))?;
@@ -5646,14 +5716,14 @@ fn provider_tool_rules(
         .collect()
 }
 
-fn provider_blocking_rules(provider: &str) -> BTreeSet<String> {
+fn provider_preserved_restrictions(provider: &str) -> BTreeSet<String> {
     let rules: &[&str] = match provider {
         "codex" => &["mcp_servers.existing.tools.existing_tool.approval_mode=deny"],
         "claude-code" => &["permissions.deny:Bash(rm:*)", "permissions.ask:WebFetch(*)"],
         "cursor" => &["permissions.deny:Shell(rm:*)", "ideTrust=prompt-only"],
         "opencode" => &[
-            "existing_*|*|ask",
-            "dangerous_*|*|deny",
+            "permissions:existing_*|*|ask",
+            "permissions:dangerous_*|*|deny",
             "last-matching-rule-wins",
         ],
         "zed" => &[
@@ -5706,21 +5776,62 @@ fn validate_provider_stripped(
     scope: &ProviderScopeFixture,
     paths: &[PathBuf],
     server_id: &str,
-    fixture: &ProviderFixture,
+    trusted_documents: &BTreeMap<String, Vec<u8>>,
+    remove_registration: bool,
 ) -> Result<()> {
-    let rules = provider_tool_rules(&provider.id, server_id, &fixture.owned_tools)?;
     for (document, path) in scope.documents.iter().zip(paths) {
         let text = fs::read_to_string(path)?;
-        if !text.contains("unchanged") {
-            anyhow::bail!("strip/uninstall removed unrelated provider bytes");
+        if remove_registration {
+            let parsed = parse_provider_document(document, &text)?;
+            let initial = parse_provider_document(document, &document.initial)?;
+            if parsed != initial {
+                anyhow::bail!("uninstall did not restore the original provider values");
+            }
+            continue;
         }
-        if text.contains(server_id)
-            || fixture.owned_tools.iter().any(|tool| text.contains(tool))
-            || rules.iter().any(|rule| text.contains(rule))
-        {
-            anyhow::bail!("strip/uninstall retained an owned registration or trust rule");
+        let mut parsed = parse_provider_document(document, &text)?;
+        if document.role.contains("registration") {
+            validate_provider_registration(&provider.id, document, &text, server_id)?;
+            let parent_pointer = match provider.id.as_str() {
+                "codex" => "/mcp_servers",
+                "claude-code" | "cursor" => "/mcpServers",
+                "opencode" => "/mcp/servers",
+                "zed" => "/context_servers",
+                other => anyhow::bail!("unknown provider {other}"),
+            };
+            let key = format!("{}:{}", document.role, document.relative_path);
+            let trusted_text = std::str::from_utf8(
+                trusted_documents
+                    .get(&key)
+                    .context("trusted provider document is absent")?,
+            )?;
+            let trusted = parse_provider_document(document, trusted_text)?;
+            let registration_pointer =
+                format!("{parent_pointer}/{}", json_pointer_escape(server_id));
+            let mut expected_registration = trusted
+                .pointer(&registration_pointer)
+                .context("trusted provider registration is absent")?
+                .clone();
+            if provider.id == "codex" {
+                let expected = expected_registration
+                    .as_object_mut()
+                    .context("trusted Codex registration is not an object")?;
+                expected.remove("enabled_tools");
+                expected.remove("tools");
+            }
+            let retained_registration = parsed
+                .pointer_mut(parent_pointer)
+                .and_then(Value::as_object_mut)
+                .context("provider registration parent is not an object")?
+                .remove(server_id)
+                .context("retained provider registration is absent")?;
+            if retained_registration != expected_registration {
+                anyhow::bail!("strip changed the retained provider registration");
+            }
         }
-        parse_provider_document(document, &text)?;
+        if parsed != parse_provider_document(document, &document.initial)? {
+            anyhow::bail!("strip changed values other than the owned registration and trust rules");
+        }
     }
     Ok(())
 }
@@ -5949,88 +6060,272 @@ fn json_pointer_escape(value: &str) -> String {
 fn validate_manifest(
     manifest: &Value,
     provider: &str,
-    scope: &str,
+    scope: &ProviderScopeFixture,
     document_paths: &[PathBuf],
     schema: &Value,
-    require_adopted: bool,
+    case_id: &str,
+    server_id: &str,
 ) -> Result<()> {
     let version = schema
         .get("currentVersion")
         .and_then(Value::as_u64)
         .context("fixture manifest schema lacks currentVersion")?;
-    if manifest.get("version").and_then(Value::as_u64) != Some(version) {
-        anyhow::bail!("install manifest version mismatch");
+    if manifest.get("schema_version").and_then(Value::as_u64) != Some(version) {
+        anyhow::bail!("schema-v2 install manifest version mismatch");
     }
+    if manifest
+        .get("icm_version")
+        .and_then(Value::as_str)
+        .is_none_or(str::is_empty)
+        || manifest.get("entries").and_then(Value::as_array).is_none()
+    {
+        anyhow::bail!("install manifest lacks current top-level metadata");
+    }
+    chrono::DateTime::parse_from_rfc3339(
+        manifest
+            .get("updated_at")
+            .and_then(Value::as_str)
+            .context("install manifest updated_at is absent")?,
+    )
+    .context("install manifest updated_at is not RFC 3339")?;
     let ownership_field = schema
         .get("topLevelOwnershipField")
         .and_then(Value::as_str)
         .context("fixture manifest schema lacks topLevelOwnershipField")?;
-    let entries = manifest
+    let ownership = manifest
         .get(ownership_field)
-        .and_then(Value::as_array)
-        .context("install manifest lacks provider ownership array")?;
-    let required = schema
-        .get("requiredOwnershipFields")
-        .and_then(Value::as_array)
-        .context("fixture manifest schema lacks requiredOwnershipFields")?;
-    let matching: Vec<_> = entries
-        .iter()
-        .filter(|entry| {
-            entry.get("provider").and_then(Value::as_str) == Some(provider)
-                && entry.get("scope").and_then(Value::as_str) == Some(scope)
-        })
-        .collect();
-    if matching.is_empty() {
-        anyhow::bail!("install manifest has no ownership records for provider/scope");
+        .and_then(Value::as_object)
+        .context("install manifest lacks schema-v2 provider ownership object")?;
+    let producer_version = schema
+        .get("producerVersion")
+        .and_then(Value::as_str)
+        .context("fixture manifest schema lacks producerVersion")?;
+    if ownership.get("schema_version").and_then(Value::as_u64) != Some(2)
+        || ownership.get("min_reader_version").and_then(Value::as_u64) != Some(2)
+        || ownership.get("producer_version").and_then(Value::as_str) != Some(producer_version)
+        || ownership.get("installation_id").and_then(Value::as_str) != Some(server_id)
+        || ownership
+            .get("generation")
+            .and_then(Value::as_u64)
+            .is_none()
+    {
+        anyhow::bail!("provider ownership journal is not the current schema-v2 installation");
     }
+    let sha256 = |value: Option<&Value>| {
+        value.and_then(Value::as_str).is_some_and(|hash| {
+            hash.len() == 64 && hash.chars().all(|character| character.is_ascii_hexdigit())
+        })
+    };
     let expected_paths: BTreeSet<_> = document_paths
         .iter()
         .map(|path| path.to_string_lossy().into_owned())
         .collect();
-    let mut adopted = false;
-    for entry in matching {
-        for field in required {
-            let field = field
-                .as_str()
-                .context("manifest required field is not a string")?;
-            if entry.get(field).is_none() {
-                anyhow::bail!("ownership manifest entry lacks {field}");
-            }
-        }
-        let path = entry
-            .get("configPath")
-            .and_then(Value::as_str)
-            .context("manifest configPath is not a string")?;
-        if !expected_paths.contains(path) {
-            anyhow::bail!("ownership manifest references a non-scope configuration path");
-        }
-        for hash_field in ["beforeHash", "afterHash"] {
-            let hash = entry
-                .get(hash_field)
+    let expected_formats: BTreeMap<_, _> = document_paths
+        .iter()
+        .zip(&scope.documents)
+        .map(|(path, document)| {
+            (
+                path.to_string_lossy().into_owned(),
+                document.format.as_str(),
+            )
+        })
+        .collect();
+    let operations = ownership
+        .get("operations")
+        .and_then(Value::as_array)
+        .context("provider ownership operations is not an array")?;
+    let expected_action = match case_id {
+        "provenance-after-each-mutation" | "external-equal-adopted-not-owned" => "trust",
+        "strip-owned-values-only" => "strip",
+        "uninstall-owned-values-only" => "uninstall",
+        _ => unreachable!("manifest validation only runs for provider mutation cases"),
+    };
+    let operation_ids: BTreeSet<_> = operations
+        .iter()
+        .filter_map(|operation| operation.get("id").and_then(Value::as_str))
+        .collect();
+    let latest = operations
+        .iter()
+        .rfind(|operation| {
+            operation
+                .pointer("/requested/provider")
                 .and_then(Value::as_str)
-                .context("manifest hash is not a string")?;
-            if hash.len() != 64 || !hash.chars().all(|character| character.is_ascii_hexdigit()) {
-                anyhow::bail!("ownership manifest {hash_field} is not a SHA-256");
-            }
-        }
-        let written_at = entry
-            .get("writtenAt")
-            .and_then(Value::as_str)
-            .context("manifest writtenAt is not a string")?;
-        chrono::DateTime::parse_from_rfc3339(written_at)
-            .context("manifest writtenAt is not RFC 3339")?;
-        let owned = entry
-            .get("owned")
-            .and_then(Value::as_bool)
-            .context("manifest owned is not boolean")?;
-        let preexisting = entry
-            .get("preexisting")
-            .and_then(Value::as_bool)
-            .context("manifest preexisting is not boolean")?;
-        adopted |= preexisting && !owned;
+                == Some(provider)
+                && operation
+                    .pointer("/requested/scope")
+                    .and_then(Value::as_str)
+                    == Some(scope.scope.as_str())
+        })
+        .context("provider ownership journal has no matching operation")?;
+    let requested = latest
+        .get("requested")
+        .context("provider operation lacks requested metadata")?;
+    if requested.get("surface").and_then(Value::as_str) != Some(scope.surface.as_str())
+        || requested.get("dialect").and_then(Value::as_str) != Some(scope.dialect.as_str())
+        || requested.get("action").and_then(Value::as_str) != Some(expected_action)
+    {
+        anyhow::bail!("latest provider operation does not match the provider scope");
     }
-    if require_adopted && !adopted {
-        anyhow::bail!("externally equal provider rule was falsely recorded as owned");
+    let phase = if expected_action == "trust" {
+        "applied"
+    } else {
+        "removed"
+    };
+    if latest.get("phase").and_then(Value::as_str) != Some(phase) {
+        anyhow::bail!("latest provider operation has the wrong phase");
+    }
+    let targets = latest
+        .get("targets")
+        .and_then(Value::as_array)
+        .context("provider operation targets is not an array")?;
+    let target_paths: BTreeSet<_> = targets
+        .iter()
+        .filter_map(|target| target.get("canonical_path").and_then(Value::as_str))
+        .collect();
+    for target in targets {
+        let canonical_path = target
+            .get("canonical_path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if target
+            .get("display_path")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+            || expected_formats.get(canonical_path).copied()
+                != target.get("format").and_then(Value::as_str)
+            || target.get("dialect").and_then(Value::as_str) != Some(scope.dialect.as_str())
+            || target.get("patch").and_then(Value::as_object).is_none()
+            || target.get("inverse").and_then(Value::as_object).is_none()
+            || target
+                .get("ownership_delta")
+                .and_then(Value::as_object)
+                .is_none()
+            || target.get("phase").and_then(Value::as_str) != Some(phase)
+            || !sha256(target.get("before_hash"))
+            || !sha256(target.get("expected_after_hash"))
+            || !sha256(target.get("observed_after_hash"))
+        {
+            anyhow::bail!("provider target lacks current schema-v2 provenance");
+        }
+    }
+    let fragments = ownership
+        .get("owned_fragments")
+        .and_then(Value::as_array)
+        .context("provider owned_fragments is not an array")?;
+    let matching: Vec<_> = fragments
+        .iter()
+        .filter(|fragment| {
+            fragment.get("provider").and_then(Value::as_str) == Some(provider)
+                && fragment.get("scope").and_then(Value::as_str) == Some(scope.scope.as_str())
+        })
+        .collect();
+    let expected_target_paths = if case_id == "strip-owned-values-only" {
+        matching
+            .iter()
+            .filter(|fragment| {
+                fragment.get("ownership_kind").and_then(Value::as_str) == Some("removed")
+            })
+            .filter_map(|fragment| fragment.get("canonical_path").and_then(Value::as_str))
+            .collect()
+    } else {
+        expected_paths.iter().map(String::as_str).collect()
+    };
+    let expected_target_count = if case_id == "strip-owned-values-only" {
+        matching
+            .iter()
+            .filter(|fragment| {
+                fragment.get("ownership_kind").and_then(Value::as_str) == Some("removed")
+            })
+            .count()
+    } else {
+        matching.len()
+    };
+    if target_paths != expected_target_paths || targets.len() != expected_target_count {
+        anyhow::bail!("latest provider operation does not cover exact mutation paths");
+    }
+    for fragment in &matching {
+        let canonical_path = fragment
+            .get("canonical_path")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if fragment
+            .get("id")
+            .and_then(Value::as_str)
+            .is_none_or(str::is_empty)
+            || fragment
+                .get("display_path")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+            || expected_formats.get(canonical_path).copied()
+                != fragment.get("format").and_then(Value::as_str)
+            || fragment
+                .get("semantic_selector")
+                .and_then(Value::as_str)
+                .is_none_or(str::is_empty)
+            || fragment
+                .get("created_containers")
+                .and_then(Value::as_array)
+                .is_none()
+            || !matches!(
+                fragment.get("ownership_kind").and_then(Value::as_str),
+                Some("owned" | "adopted" | "removed")
+            )
+            || fragment.get("generation").and_then(Value::as_u64).is_none()
+            || fragment.get("surface").and_then(Value::as_str) != Some(scope.surface.as_str())
+            || fragment.get("dialect").and_then(Value::as_str) != Some(scope.dialect.as_str())
+            || !expected_paths.contains(canonical_path)
+            || !operation_ids.contains(
+                fragment
+                    .get("introducing_operation_id")
+                    .and_then(Value::as_str)
+                    .unwrap_or(""),
+            )
+            || !sha256(fragment.get("value_fingerprint"))
+        {
+            anyhow::bail!("provider fragment lacks current schema-v2 provenance");
+        }
+    }
+    let active: Vec<_> = matching
+        .iter()
+        .filter(|fragment| {
+            matches!(
+                fragment.get("ownership_kind").and_then(Value::as_str),
+                Some("owned" | "adopted")
+            )
+        })
+        .collect();
+    let all_kind = |kind| {
+        !active.is_empty()
+            && active.iter().all(|fragment| {
+                fragment.get("ownership_kind").and_then(Value::as_str) == Some(kind)
+            })
+    };
+    let registration_selector = match provider {
+        "codex" => format!("mcp_servers.{server_id}"),
+        "claude-code" | "cursor" => format!("mcpServers.{server_id}"),
+        "opencode" => format!("mcp.servers.{server_id}"),
+        "zed" => format!("context_servers.{server_id}"),
+        other => anyhow::bail!("unknown provider {other}"),
+    };
+    match case_id {
+        "provenance-after-each-mutation" if !all_kind("owned") => {
+            anyhow::bail!("trust provenance is not owned")
+        }
+        "external-equal-adopted-not-owned" if !all_kind("adopted") => {
+            anyhow::bail!("external-equal provenance is not adopted")
+        }
+        "strip-owned-values-only"
+            if active.len() != 1
+                || !all_kind("owned")
+                || active[0].get("semantic_selector").and_then(Value::as_str)
+                    != Some(registration_selector.as_str()) =>
+        {
+            anyhow::bail!("strip did not retain exactly the registration")
+        }
+        "uninstall-owned-values-only" if !active.is_empty() => {
+            anyhow::bail!("uninstall retained active fragments")
+        }
+        _ => {}
     }
     Ok(())
 }
@@ -6079,17 +6374,14 @@ fn assert_proxy_transport_headers(
         .get("method")
         .and_then(Value::as_str)
         .context("proxy body lacks method")?;
-    let name = body
-        .pointer("/params/name")
-        .and_then(Value::as_str)
-        .unwrap_or("");
     let headers = record
         .get("headers")
         .and_then(Value::as_object)
         .context("proxy record lacks headers")?;
+    let modern_method = (protocol_version == "2026-07-28").then_some(method);
     if headers.get("mcp-protocol-version").and_then(Value::as_str) != Some(protocol_version)
-        || headers.get("mcp-method").and_then(Value::as_str) != Some(method)
-        || headers.get("mcp-name").and_then(Value::as_str) != Some(name)
+        || headers.get("mcp-method").and_then(Value::as_str) != modern_method
+        || headers.get("mcp-name").is_some()
         || headers.get("mcp-session-id").and_then(Value::as_str) != session_id
     {
         anyhow::bail!("proxy transport headers do not match the forwarded MCP body/era/session");
@@ -6623,9 +6915,15 @@ mod tests {
                 assert_eq!(registration["type"], "local");
                 assert_eq!(registration["command"][0].as_str(), candidate.to_str());
                 assert_eq!(registration["command"][1], "serve");
+            } else if matches!(provider, "claude-code" | "cursor") {
+                assert_eq!(registration["type"], "stdio");
+                assert_eq!(registration["command"].as_str(), candidate.to_str());
+                assert_eq!(registration["args"][0], "serve");
+                assert_eq!(registration["env"], json!({}));
             } else {
                 assert_eq!(registration["command"].as_str(), candidate.to_str());
                 assert_eq!(registration["args"][0], "serve");
+                assert_eq!(registration["env"], json!({}));
             }
         }
         fs::remove_dir_all(root).unwrap();

@@ -1,5 +1,5 @@
 {
-  "contractVersion": 2,
+  "contractVersion": 3,
   "accessedAt": "2026-08-07",
   "sources": [
     "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports"
@@ -26,11 +26,11 @@
     "acceptedResponseContentType": "application/json",
     "host": "exact selected authority",
     "origin": "absent",
-    "mcpProtocolVersion": "exact negotiated or per-request protocol era",
-    "mcpMethod": "exact JSON-RPC body method",
-    "mcpName": "exact params.name or empty string",
-    "legacy2025Session": "opaque Mcp-Session-Id from initialize response reused after notifications/initialized",
-    "modern2026Session": "absent",
+    "mcpProtocolVersion": "Mcp-Protocol-Version follows the negotiated protocol era: 2025-11-25 after 2025 initialization, or per-request 2026-07-28",
+    "mcpMethod": "Mcp-Method is required only for per-request 2026-07-28; it is the exact JSON-RPC body method and is absent after initialized 2025-11-25",
+    "mcpName": "Mcp-Name is required only for 2026-07-28 name-bearing methods, with exact params.name; it is absent for tools/list and after initialized 2025-11-25",
+    "legacy2025Session": "Mcp-Session-Id is an opaque value from the initialize response, reused after notifications/initialized for negotiated 2025-11-25",
+    "modern2026Session": "Mcp-Session-Id is absent for per-request 2026-07-28",
     "automaticRetries": 0,
     "hopByHopHeadersForwarded": false,
     "responseIdMustEqualRequestId": true,

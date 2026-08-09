@@ -43,19 +43,9 @@ const EXACT_RULES: &[(&str, &str, &str)] = &[
         "ulid",
     ),
     (
-        "modern.structured-transcript-start",
-        "/response/result/content/0/text",
-        "ulid-in-text",
-    ),
-    (
         "modern.structured-transcript-record",
         "/response/result/structuredContent/messageId",
         "ulid",
-    ),
-    (
-        "modern.structured-transcript-record",
-        "/response/result/content/0/text",
-        "ulid-in-text",
     ),
     (
         "modern.structured-feedback-record",
@@ -64,8 +54,78 @@ const EXACT_RULES: &[(&str, &str, &str)] = &[
     ),
     (
         "modern.structured-feedback-record",
-        "/response/result/content/0/text",
-        "ulid-in-text",
+        "/response/result/structuredContent/createdAt",
+        "rfc3339",
+    ),
+    (
+        "modern.structured-memory-recall",
+        "/response/result/structuredContent/memories/0/lastAccessed",
+        "rfc3339",
+    ),
+    (
+        "modern.concise-text-no-duplication",
+        "/response/result/structuredContent/memories/0/lastAccessed",
+        "rfc3339",
+    ),
+    (
+        "modern.2025-06-structured-recall",
+        "/response/result/structuredContent/memories/0/lastAccessed",
+        "rfc3339",
+    ),
+    (
+        "modern.2025-11-structured-recall",
+        "/response/result/structuredContent/memories/0/lastAccessed",
+        "rfc3339",
+    ),
+    (
+        "modern.schema-valid-real-emissions",
+        "/responses/0/result/structuredContent/memories/0/lastAccessed",
+        "rfc3339",
+    ),
+    (
+        "modern.schema-valid-real-emissions",
+        "/responses/3/result/structuredContent/sessionId",
+        "ulid",
+    ),
+    (
+        "modern.schema-valid-real-emissions",
+        "/responses/4/result/structuredContent/messageId",
+        "ulid",
+    ),
+    (
+        "modern.schema-valid-real-emissions",
+        "/responses/5/result/structuredContent/hits/0/session/updatedAt",
+        "rfc3339",
+    ),
+    (
+        "modern.schema-valid-real-emissions",
+        "/responses/6/result/structuredContent/session/updatedAt",
+        "rfc3339",
+    ),
+    (
+        "modern.schema-valid-real-emissions",
+        "/responses/6/result/structuredContent/messages/4/id",
+        "ulid",
+    ),
+    (
+        "modern.schema-valid-real-emissions",
+        "/responses/6/result/structuredContent/messages/4/timestamp",
+        "rfc3339",
+    ),
+    (
+        "modern.schema-valid-real-emissions",
+        "/responses/7/result/structuredContent/newest",
+        "rfc3339",
+    ),
+    (
+        "modern.schema-valid-real-emissions",
+        "/responses/8/result/structuredContent/id",
+        "ulid",
+    ),
+    (
+        "modern.schema-valid-real-emissions",
+        "/responses/8/result/structuredContent/createdAt",
+        "rfc3339",
     ),
 ];
 

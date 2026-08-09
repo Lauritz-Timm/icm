@@ -69,19 +69,25 @@ pub fn verify(suite_root: &Path) -> Result<DesignVerification> {
         .get("designVersion")
         .and_then(Value::as_u64)
         .context("missing designVersion")?;
-    if design_version != 9 {
-        anyhow::bail!("expected preregistration designVersion 9");
+    if design_version != 12 {
+        anyhow::bail!("expected preregistration designVersion 12");
     }
     let expected_provenance = serde_json::json!({
         "initialDesignFrozenAt": "2026-08-05",
         "initialDesignFrozenBeforeReplacementImplementation": true,
         "laterRevisionsArePostImplementationAuditSpecCorrections": true,
-        "version9FrozenBeforeFinalCandidateRun": true,
+        "version9FrozenBeforeInitialFinalCandidateRun": true,
+        "version10FrozenBeforeCorrectedCandidateRun": true,
+        "version11FrozenBeforeDefinitiveTwoRootSelfTest": true,
+        "version12FrozenBeforeCorrectedTwoRootSelfTest": true,
         "scenarioInventoryAndThresholdsUnchanged": true,
-        "version9Revision": "Provider/OpenCode and HTTP session/Origin audit/spec corrections."
+        "version9Revision": "Provider/OpenCode and HTTP session/Origin audit/spec corrections.",
+        "version10Revision": "Align the evaluator with the final provider journal and revision-sensitive proxy headers, and close portable provider-state, Git-ancestry, and cross-scenario canary gaps.",
+        "version11Revision": "Remove stale modern text ULID normalization rules: modern IDs are normalized in structuredContent while concise text intentionally does not duplicate them.",
+        "version12Revision": "Declare exact normalization pointers for the remaining dynamic structured IDs and RFC3339 timestamps exposed by the v11 two-root diff; scenarios and thresholds remain unchanged."
     });
     if design.get("provenance") != Some(&expected_provenance) {
-        anyhow::bail!("design provenance differs from the frozen v9 audit record");
+        anyhow::bail!("design provenance differs from the frozen v12 audit record");
     }
 
     verify_environment(&design)?;

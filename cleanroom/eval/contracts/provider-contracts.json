@@ -1,6 +1,7 @@
 {
-  "contractVersion": 2,
+  "contractVersion": 3,
   "accessedAt": "2026-08-07",
+  "auditedAt": "2026-08-09",
   "sources": [
     "https://opencode.ai/v2/docs/mcp-servers",
     "https://opencode.ai/v2/docs/permissions"
@@ -14,7 +15,7 @@
   },
   "cli": {
     "prefix": ["provider"],
-    "operations": ["trust", "strip", "doctor"],
+    "operations": ["trust", "strip", "doctor", "recover"],
     "providers": ["codex", "claude-code", "cursor", "opencode", "zed"],
     "scopes": ["project-local", "user"],
     "nonInteractiveConfirmationFlag": "--yes",
@@ -25,19 +26,25 @@
       "dialect",
       "serverId",
       "toolRules",
-      "blockingRules",
+      "preservedRestrictions",
+      "causalBlockers",
       "ownershipDisposition"
     ],
     "resolvedPlanOutput": {
       "encoding": "one JSON object on stdout",
       "paths": "exact normalized paths for every registration and permission document in the selected scope",
       "toolRules": "set equality with the two provider-specific trusted-tool rules",
-      "blockingRules": "set equality with all seeded deny, ask, confirm, default, and precedence blockers",
+      "preservedRestrictions": "set equality with all seeded deny, ask, confirm, default, and precedence restrictions",
+      "causalBlockers": "currently empty for an unseeded installation; identifies restrictions that directly block the requested provider values",
       "ownershipDispositionItem": ["path", "rule", "disposition"],
-      "ownershipDispositionStates": ["new-owned", "preexisting-adopted", "blocked-existing", "owned-existing"]
+      "ownershipDispositionStates": [
+        "new-owned", "preexisting-adopted", "blocked-existing", "owned-existing", "already-removed"
+      ]
     },
     "doctorTableCase": "exact-path-and-scope",
     "doctorEveryProviderAndScope": true,
+    "doctorRequiresInstallationIdentity": true,
+    "evaluatorPreseedsSyntheticInstallationIdentity": true,
     "topLevelDoctorPreserved": true
   },
   "providers": {
@@ -95,9 +102,23 @@
     },
     "version": 2,
     "field": "providerOwnership",
-    "requiredEntryFields": [
-      "provider", "scope", "configPath", "surface", "rule", "preexisting", "owned",
-      "beforeHash", "afterHash", "writtenAt", "writerVersion"
+    "shape": "schema-v2 operation and fragment provenance journal",
+    "requiredTopLevelFields": [
+      "schema_version", "icm_version", "updated_at", "entries", "providerOwnership"
+    ],
+    "requiredOwnershipFields": [
+      "schema_version", "min_reader_version", "producer_version", "generation",
+      "installation_id", "operations", "owned_fragments"
+    ],
+    "requiredOperationFields": ["id", "requested", "phase", "targets"],
+    "requiredTargetFields": [
+      "canonical_path", "display_path", "format", "dialect", "before_hash",
+      "expected_after_hash", "observed_after_hash", "patch", "inverse", "ownership_delta", "phase"
+    ],
+    "requiredFragmentFields": [
+      "id", "provider", "surface", "scope", "dialect", "canonical_path", "display_path",
+      "format", "semantic_selector", "value_fingerprint", "created_containers",
+      "ownership_kind", "introducing_operation_id", "generation"
     ],
     "uninstallDelegatesSharedLifecycle": true,
     "uninstallCommand": "uninstall --yes --no-backup",
@@ -124,10 +145,11 @@
     "losslessUnrelatedBytes": true,
     "ownedExactRemovalOnly": true,
     "externalEqualValuesAdoptedNotOwned": true,
+    "oppositeScopeBindingsRejectedSymmetrically": true,
     "unknownOrMalformedOrAmbiguousZeroWrites": true
   },
   "adversarialFixtures": {
-    "externalEqual": "exact registration and two trust rules are seeded in the selected real documents after doctor resolves serverId; manifest must mark them preexisting-adopted and not owned",
+    "externalEqual": "exact registration and two trust rules are seeded in the selected real documents after doctor resolves serverId; schema-v2 fragments must mark them adopted and not owned",
     "shadowing": "the same serverId is seeded on the other documented scope's real registration and permission surfaces; selected binding must fail closed without writes",
     "normalizationCollision": "raw server IDs icm-a and icm_a plus their exact dialect rules are seeded in the selected real documents",
     "unknownDialect": "the selected real document contains a syntactically valid foreign or mixed documented permission grammar, not an ignored evaluator marker",

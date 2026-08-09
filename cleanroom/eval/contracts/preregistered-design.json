@@ -1,13 +1,19 @@
 {
-  "designVersion": 9,
+  "designVersion": 12,
   "scenarioCount": 294,
   "provenance": {
     "initialDesignFrozenAt": "2026-08-05",
     "initialDesignFrozenBeforeReplacementImplementation": true,
     "laterRevisionsArePostImplementationAuditSpecCorrections": true,
-    "version9FrozenBeforeFinalCandidateRun": true,
+    "version9FrozenBeforeInitialFinalCandidateRun": true,
+    "version10FrozenBeforeCorrectedCandidateRun": true,
+    "version11FrozenBeforeDefinitiveTwoRootSelfTest": true,
+    "version12FrozenBeforeCorrectedTwoRootSelfTest": true,
     "scenarioInventoryAndThresholdsUnchanged": true,
-    "version9Revision": "Provider/OpenCode and HTTP session/Origin audit/spec corrections."
+    "version9Revision": "Provider/OpenCode and HTTP session/Origin audit/spec corrections.",
+    "version10Revision": "Align the evaluator with the final provider journal and revision-sensitive proxy headers, and close portable provider-state, Git-ancestry, and cross-scenario canary gaps.",
+    "version11Revision": "Remove stale modern text ULID normalization rules: modern IDs are normalized in structuredContent while concise text intentionally does not duplicate them.",
+    "version12Revision": "Declare exact normalization pointers for the remaining dynamic structured IDs and RFC3339 timestamps exposed by the v11 two-root diff; scenarios and thresholds remain unchanged."
   },
   "officialSources": {
     "accessedAt": "2026-08-05",
@@ -130,8 +136,10 @@
     "explicitWorkspaceRootRequired": true,
     "candidateSuiteWorkEvidencePairwiseDisjoint": true,
     "allRunnerPathsStrictChildrenOfWorkspace": true,
-    "gitWorkspaceRejected": true,
+    "gitWorkspaceAndAncestorsRejected": true,
     "standardDefaultUserStateRootsRejected": true,
+    "providerDefaultAndExplicitStateRootsRejected": true,
+    "allRegisteredCanariesVerifiedAfterEveryScenario": true,
     "configuredEndpointsLoopbackOnly": true,
     "recordedIntegrationPeerAndLocalSocketsLoopback": true,
     "evaluatorProvidedExternalEndpointsAllowed": 0,
@@ -211,10 +219,11 @@
     "providerCommands": [
       "provider trust --provider <id> --scope <project-local|user> --yes",
       "provider strip --provider <id> --scope <project-local|user> --yes",
-      "provider doctor --provider <id> --scope <project-local|user>"
+      "provider doctor --provider <id> --scope <project-local|user>",
+      "provider recover --provider <id> --scope <project-local|user> --yes"
     ],
     "providerResolvedPlanRequired": true,
-    "providerResolvedPlanFormat": "one JSON object on stdout with exact paths, surface, scope, dialect, installation-scoped serverId, exact two toolRules, exact blockingRules, and itemized ownershipDisposition",
+    "providerResolvedPlanFormat": "one JSON object on stdout with exact paths, surface, scope, dialect, installation-scoped serverId, exact two toolRules, preservedRestrictions, causalBlockers, and itemized ownershipDisposition",
     "providerDoctorMatrixCase": "exact-path-and-scope for all five providers and both scopes",
     "providerManifestPaths": {
       "linux": "$XDG_DATA_HOME/icm/install-manifest.json",

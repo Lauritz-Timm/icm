@@ -60,8 +60,8 @@
     "claude-code": {
       "projectRegistrationPath": ".mcp.json",
       "projectPermissionPath": ".claude/settings.local.json",
-      "userRegistrationPath": "~/.claude.json",
-      "userPermissionPath": "~/.claude/settings.json",
+      "userRegistrationPath": "$CLAUDE_CONFIG_DIR/.claude.json",
+      "userPermissionPath": "$CLAUDE_CONFIG_DIR/settings.json",
       "trust": "mcp__<S>__<tool>",
       "precedence": ["deny", "ask", "allow"]
     },
@@ -126,7 +126,7 @@
   },
   "portableUserRoots": {
     "codex": "CODEX_HOME when set, otherwise $HOME/.codex",
-    "claude-code": "CLAUDE_CONFIG_DIR when set, otherwise $HOME/.claude; user registration remains $HOME/.claude.json",
+    "claude-code": "CLAUDE_CONFIG_DIR when set, otherwise $HOME/.claude; user registration is co-located as .claude.json",
     "cursor": "$HOME/.cursor",
     "opencode": {
       "linux": "$XDG_CONFIG_HOME/opencode",

@@ -69,7 +69,7 @@
           "documents": [
             {
               "role": "registration",
-              "root": "claude-user-home",
+              "root": "claude-user-config",
               "format": "json",
               "relativePath": ".claude.json",
               "initial": "{\"sentinel\":{\"keep\":\"claude-user-registration-unchanged\"},\"mcpServers\":{\"existing\":{\"command\":\"existing-command\"}}}"

@@ -2261,7 +2261,11 @@ impl Runner {
             populated: true,
             fixture_profile: FixtureProfile::Standard,
             compact: false,
-            init: Init::Legacy,
+            init: if id == "boundary.path-traversal" {
+                Init::None
+            } else {
+                Init::Legacy
+            },
             fault_database: false,
         }, |client, _, _| {
             let response = match id {
@@ -2342,11 +2346,12 @@ impl Runner {
                     "icm_memory_recall",
                     json!({"query":"NEAR(\"unterminated * OR NOT","project":"","limit":10}),
                 ))?,
-                "boundary.path-traversal" => client.request(tool_call(
+                "boundary.path-traversal" => modern_tool_call(
+                    client,
                     2,
                     "icm_learn",
                     json!({"directory":"../","name":"path-traversal-attempt"}),
-                ))?,
+                )?,
                 "boundary.oversized-line" => {
                     let oversized = format!(
                         "{{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\",\"params\":{{\"padding\":\"{}\"}}}}",
@@ -6997,7 +7002,7 @@ mod tests {
             assert_eq!(
                 provider_document_paths_for_platform(&sandbox, claude, platform).unwrap(),
                 vec![
-                    sandbox.home.join(".claude.json"),
+                    claude_config.join(".claude.json"),
                     claude_config.join("settings.json")
                 ]
             );

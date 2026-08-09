@@ -157,6 +157,68 @@ fn uninstall_is_idempotent_when_already_clean() {
     );
 }
 
+#[test]
+fn uninstall_removes_manifest_owned_provider_values() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let cwd = home.join("proj");
+    std::fs::create_dir_all(cwd.join(".git")).unwrap();
+
+    let trust = icm_in(
+        home,
+        &cwd,
+        &[
+            "provider",
+            "trust",
+            "--provider",
+            "zed",
+            "--scope",
+            "project-local",
+            "--yes",
+        ],
+    );
+    assert!(
+        trust.status.success(),
+        "provider trust failed: {}",
+        String::from_utf8_lossy(&trust.stderr)
+    );
+    let settings = cwd.join(".zed/settings.json");
+    assert!(std::fs::read_to_string(&settings)
+        .unwrap()
+        .contains("icm_memory_recall"));
+
+    let other_cwd = home.join("other-project");
+    std::fs::create_dir_all(&other_cwd).unwrap();
+    let check = icm_in(home, &other_cwd, &["uninstall", "--check"]);
+    assert_eq!(check.status.code(), Some(1));
+    assert!(String::from_utf8_lossy(&check.stdout).contains("FOUND: 3 known ICM residue item(s)"));
+
+    let uninstall = icm_in(home, &other_cwd, &["uninstall", "--yes", "--no-backup"]);
+    assert!(
+        uninstall.status.success(),
+        "provider uninstall failed: {}",
+        String::from_utf8_lossy(&uninstall.stderr)
+    );
+    assert!(!settings.exists());
+    let stdout = String::from_utf8_lossy(&uninstall.stdout);
+    assert!(
+        stdout.contains("[Provider MCP"),
+        "missing provider result: {stdout}"
+    );
+    assert!(
+        stdout.contains("Files modified : 0"),
+        "wrong modified count: {stdout}"
+    );
+    assert!(
+        stdout.contains("Files deleted  : 1"),
+        "wrong deleted count: {stdout}"
+    );
+    assert!(
+        stdout.contains("Entries removed: 3"),
+        "wrong entry count: {stdout}"
+    );
+}
+
 // `directories::ProjectDirs` returns OS-specific data/cache paths that
 // don't match the Linux XDG layout this test seeds. Gate it to Linux
 // where seed and code agree — the macOS/Windows path resolution is

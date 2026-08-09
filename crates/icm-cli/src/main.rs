@@ -24,6 +24,7 @@ mod learn_tests;
 // time; the static build links onnxruntime in.
 #[cfg(feature = "embeddings-dynamic")]
 mod ort_runtime;
+mod provider;
 mod provider_document;
 mod provider_journal;
 mod recall_format;
@@ -455,6 +456,9 @@ enum Commands {
     /// Use `--dry-run` or `--audit` for a preview; `--check` for an exit-code
     /// signal (0 = clean). See issue #229.
     Uninstall(uninstall::UninstallOpts),
+
+    /// Resolve provider-specific MCP registration and trust plans.
+    Provider(provider::ProviderArgs),
 
     /// List files the agent has worked in during recent sessions.
     ///
@@ -1602,6 +1606,9 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    if let Commands::Provider(args) = &cli.command {
+        return provider::run(args);
+    }
     let cfg = config::load_config()?;
     let embeddings_enabled =
         cfg.embeddings.enabled && !cli.no_embeddings && std::env::var("ICM_NO_EMBEDDINGS").is_err();
@@ -2042,6 +2049,7 @@ fn main() -> Result<()> {
         Commands::Doctor => cmd_doctor(&db_path),
         Commands::Repair { dry_run } => cmd_repair(&db_path, dry_run),
         Commands::Uninstall(_) => unreachable!("dispatched before open_store"),
+        Commands::Provider(_) => unreachable!("dispatched before configuration loading"),
         // `icm embeddings` is dispatched before `open_store` above; this arm
         // exists only for match exhaustiveness and is unreachable.
         Commands::Embeddings { .. } => unreachable!("dispatched before open_store"),

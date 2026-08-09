@@ -1,0 +1,11 @@
+{
+  "sentinel": "unchanged",
+  "agent": {
+    "tool_permissions": {
+      "default": "confirm",
+      "tools": {
+        "dangerous.write": {"default": "deny"}
+      }
+    }
+  }
+}

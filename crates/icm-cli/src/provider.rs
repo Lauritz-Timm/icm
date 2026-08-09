@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::path::{Path, PathBuf};
@@ -57,6 +59,7 @@ enum Location {
     Project(&'static str),
     Home(&'static str),
     CodexUser,
+    ClaudeLegacyUser,
     ClaudeSettingsUser,
     OpenCodeUser,
     ZedUser,
@@ -129,7 +132,7 @@ const CLAUDE_PROJECT: &[DocumentTemplate] = &[
 ];
 const CLAUDE_USER: &[DocumentTemplate] = &[
     DocumentTemplate {
-        location: Location::Home(".claude.json"),
+        location: Location::ClaudeLegacyUser,
         kind: DocumentKind::JsonRegistration,
     },
     DocumentTemplate {
@@ -173,6 +176,19 @@ const ZED_USER: &[DocumentTemplate] = &[DocumentTemplate {
     location: Location::ZedUser,
     kind: DocumentKind::Zed,
 }];
+
+#[cfg(test)]
+thread_local! {
+    static FAIL_AFTER_FIRST_DOCUMENT_WRITE: Cell<bool> = const { Cell::new(false) };
+}
+
+#[cfg(test)]
+fn fail_after_first_document_write<T>(operation: impl FnOnce() -> T) -> T {
+    FAIL_AFTER_FIRST_DOCUMENT_WRITE.with(|fail| fail.set(true));
+    let result = operation();
+    FAIL_AFTER_FIRST_DOCUMENT_WRITE.with(|fail| fail.set(false));
+    result
+}
 
 /// The source-controlled authorization allowlist. Paths, formats, rule
 /// shapes, plan metadata, and lifecycle tests all derive from this table.
@@ -518,7 +534,10 @@ fn mutate_target(target: &TargetArgs, action: LifecycleAction) -> Result<Resolve
     if matches!(action, LifecycleAction::Apply) {
         manifest.ensure_provider_ownership()?;
     }
-    let server_id = installation_server_id(&manifest)?;
+    let server_id = match action {
+        LifecycleAction::Apply => installation_server_id(&manifest)?,
+        LifecycleAction::Strip => planning_server_id(&manifest),
+    };
     reject_prepared_operations(&manifest)?;
     let enforce_resolution = matches!(action, LifecycleAction::Apply);
     let plan = resolve_plan(target.provider, target.scope, enforce_resolution, &manifest)?;
@@ -659,7 +678,7 @@ fn resolve_plan(
     if enforce_resolution {
         validate_resolved_paths(&spec)?;
     }
-    let server_id = installation_server_id(manifest)?;
+    let server_id = planning_server_id(manifest);
     let observations = inspect(&spec, &server_id)?;
     let (preserved_restrictions, causal_blockers) = observed_restrictions(&spec, &server_id)?;
 
@@ -759,6 +778,11 @@ fn provider_spec(provider: Provider, scope: Scope) -> Result<ProviderSpec> {
                     .map(PathBuf::from)
                     .unwrap_or_else(|| home.join(".codex"))
                     .join("config.toml"),
+                Location::ClaudeLegacyUser => std::env::var_os("CLAUDE_CONFIG_DIR")
+                    .filter(|value| !value.is_empty())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| home.clone())
+                    .join(".claude.json"),
                 Location::ClaudeSettingsUser => std::env::var_os("CLAUDE_CONFIG_DIR")
                     .filter(|value| !value.is_empty())
                     .map(PathBuf::from)
@@ -1049,6 +1073,14 @@ fn platform_config_dir(
 
 fn installation_server_id(manifest: &InstallManifest) -> Result<String> {
     Ok(manifest.installation_id()?.to_owned())
+}
+
+fn planning_server_id(manifest: &InstallManifest) -> String {
+    manifest
+        .provider_ownership
+        .as_ref()
+        .map(|ownership| ownership.installation_id.clone())
+        .unwrap_or_else(|| "icm".to_owned())
 }
 
 fn validate_resolved_paths(spec: &ProviderSpec) -> Result<()> {
@@ -2136,53 +2168,80 @@ fn prepare_trust_operation(
     spec: &ProviderSpec,
     documents: &[PreparedSourceDocument],
 ) -> Result<Option<String>> {
-    let ownership = manifest
-        .provider_ownership
-        .as_ref()
-        .context("provider ownership journal is not initialized")?;
     let mut planned = Vec::new();
-    for document in documents {
-        let path = utf8_path(&document.document.path)?.to_owned();
-        for observation in document
-            .observations
-            .iter()
-            .filter(|observation| public_observation(document.document.kind, observation))
-        {
-            let prior = ownership.owned_fragments.iter().find(|fragment| {
-                fragment.provider == spec.definition.id
-                    && fragment.scope == spec.scope.journal_scope()
-                    && fragment.canonical_path == path
-                    && fragment.semantic_selector == observation.rule
-            });
-            if prior.is_some_and(|fragment| {
-                observation.exists
-                    && matches!(
-                        fragment.ownership_kind,
-                        OwnershipKind::Owned | OwnershipKind::Adopted
-                    )
-            }) {
-                continue;
+    let mut retired = BTreeSet::new();
+    {
+        let ownership = manifest
+            .provider_ownership
+            .as_ref()
+            .context("provider ownership journal is not initialized")?;
+        for document in documents {
+            let path = utf8_path(&document.document.path)?.to_owned();
+            for observation in document
+                .observations
+                .iter()
+                .filter(|observation| public_observation(document.document.kind, observation))
+            {
+                let prior = ownership.owned_fragments.iter().find(|fragment| {
+                    fragment.provider == spec.definition.id
+                        && fragment.scope == spec.scope.journal_scope()
+                        && fragment.canonical_path == path
+                        && fragment.semantic_selector == observation.rule
+                });
+                if prior.is_some_and(|fragment| {
+                    observation.exists
+                        && matches!(
+                            fragment.ownership_kind,
+                            OwnershipKind::Owned | OwnershipKind::Adopted
+                        )
+                }) {
+                    continue;
+                }
+                if let Some(fragment) = prior {
+                    if fragment.ownership_kind != OwnershipKind::Removed {
+                        bail!(
+                            "provider ownership history requires explicit recovery before re-trust"
+                        );
+                    }
+                    retired.insert((path.clone(), observation.rule.clone()));
+                }
+                let patch = (!observation.exists)
+                    .then(|| {
+                        document
+                            .patches
+                            .get(&observation.rule)
+                            .cloned()
+                            .with_context(|| {
+                                format!("lossless patch is absent for {:?}", observation.rule)
+                            })
+                    })
+                    .transpose()?;
+                planned.push((document, observation, patch));
             }
-            if prior.is_some() {
-                bail!("provider ownership history requires explicit recovery before re-trust");
-            }
-            let patch = (!observation.exists)
-                .then(|| {
-                    document
-                        .patches
-                        .get(&observation.rule)
-                        .cloned()
-                        .with_context(|| {
-                            format!("lossless patch is absent for {:?}", observation.rule)
-                        })
-                })
-                .transpose()?;
-            planned.push((document, observation, patch));
         }
+    }
+    if !retired.is_empty() {
+        let ownership = manifest
+            .provider_ownership
+            .as_mut()
+            .context("provider ownership journal is not initialized")?;
+        ownership.owned_fragments.retain(|fragment| {
+            !(fragment.provider == spec.definition.id
+                && fragment.scope == spec.scope.journal_scope()
+                && fragment.ownership_kind == OwnershipKind::Removed
+                && retired.contains(&(
+                    fragment.canonical_path.clone(),
+                    fragment.semantic_selector.clone(),
+                )))
+        });
     }
     if planned.is_empty() {
         return Ok(None);
     }
+    let ownership = manifest
+        .provider_ownership
+        .as_ref()
+        .context("provider ownership journal is not initialized")?;
     if ownership.owned_fragments.len() + planned.len() > MAX_OWNED_FRAGMENTS {
         bail!("provider journal owned-fragment retention bound exceeded");
     }
@@ -2199,6 +2258,17 @@ fn prepare_trust_operation(
     let mut records = Vec::new();
     for (document, observation, source_patch) in planned {
         let canonical_path = utf8_path(&document.document.path)?.to_owned();
+        // Preserve the path's original origin when re-trusting a retained fragment.
+        let document_origin = manifest
+            .provider_splices
+            .iter()
+            .find(|record| {
+                record.provider == requested.provider
+                    && record.scope == requested.scope
+                    && record.canonical_path == canonical_path
+            })
+            .map(|record| record.document_origin)
+            .unwrap_or(document.document_origin);
         let fingerprint = fragment_fingerprint(
             document.document.kind,
             &observation.rule,
@@ -2252,7 +2322,7 @@ fn prepare_trust_operation(
                 canonical_path,
                 semantic_selector: observation.rule.clone(),
                 introducing_operation_id: operation_id.clone(),
-                document_origin: document.document_origin,
+                document_origin,
                 source_patch,
             });
         }
@@ -2477,6 +2547,10 @@ fn apply_documents(
             Some(&document.after),
         )?;
         verify_provider_document(&document.document, Some(&document.after))?;
+        #[cfg(test)]
+        if FAIL_AFTER_FIRST_DOCUMENT_WRITE.with(|fail| fail.replace(false)) {
+            bail!("injected provider interruption after first document write");
+        }
     }
     finalize_operation(manifest, &operation_id, OperationPhase::Applied)?;
     manifest.save_locked(manifest_path, lock)?;
@@ -3810,33 +3884,24 @@ mod tests {
         }
     }
 
+    fn registry_fixture(kind: DocumentKind) -> &'static [u8] {
+        match kind {
+            DocumentKind::Codex => include_bytes!("../tests/fixtures/providers/codex.toml"),
+            DocumentKind::JsonRegistration => {
+                include_bytes!("../tests/fixtures/providers/registration.json")
+            }
+            DocumentKind::JsonPermissions => {
+                include_bytes!("../tests/fixtures/providers/permissions.json")
+            }
+            DocumentKind::OpenCode => include_bytes!("../tests/fixtures/providers/opencode.json"),
+            DocumentKind::Zed => include_bytes!("../tests/fixtures/providers/zed.json"),
+        }
+    }
+
     fn seed_registry_documents(spec: &ProviderSpec) {
         for document in &spec.documents {
             std::fs::create_dir_all(document.path.parent().unwrap()).unwrap();
-            let content = match document.kind {
-                DocumentKind::Codex => b"[sentinel]\nkeep = 'unchanged'\n\
-                    [mcp_servers.external.tools.external_tool]\napproval_mode = 'deny'\n"
-                    .to_vec(),
-                DocumentKind::JsonPermissions => serde_json::to_vec(&serde_json::json!({
-                    "sentinel":"unchanged",
-                    "permissions":{"deny":["Bash(rm:*)"],"ask":["WebFetch(*)"]}
-                }))
-                .unwrap(),
-                DocumentKind::OpenCode => serde_json::to_vec(&serde_json::json!({
-                    "sentinel":"unchanged",
-                    "permissions":[{"action":"dangerous_*","resource":"*","effect":"deny"}]
-                }))
-                .unwrap(),
-                DocumentKind::Zed => serde_json::to_vec(&serde_json::json!({
-                    "sentinel":"unchanged",
-                    "agent":{"tool_permissions":{"default":"confirm","tools":{
-                        "dangerous.write":{"default":"deny"}
-                    }}}
-                }))
-                .unwrap(),
-                DocumentKind::JsonRegistration => br#"{"sentinel":"unchanged"}"#.to_vec(),
-            };
-            std::fs::write(&document.path, &content).unwrap();
+            std::fs::write(&document.path, registry_fixture(document.kind)).unwrap();
         }
     }
 
@@ -4124,6 +4189,120 @@ mod tests {
     }
 
     #[test]
+    fn interrupted_apply_recovers_from_durable_preparation() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = registry_test_spec(Provider::ClaudeCode.definition(), Scope::User, tmp.path());
+        let manifest_path = tmp.path().join("install-manifest.json");
+        let lock = InstallManifest::lock(&manifest_path).unwrap();
+        let mut manifest = InstallManifest::empty();
+        manifest.provider_ownership =
+            Some(crate::provider_journal::ProviderOwnership::empty("icm123").unwrap());
+
+        let error = fail_after_first_document_write(|| {
+            apply_documents(&spec, "icm123", &mut manifest, &manifest_path, &lock)
+        })
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("injected provider interruption after first document write"));
+        assert_eq!(
+            read_provider_document_snapshot(&spec.documents[0].path)
+                .unwrap()
+                .0,
+            DocumentOrigin::Existing
+        );
+        assert_eq!(
+            read_provider_document_snapshot(&spec.documents[1].path)
+                .unwrap()
+                .0,
+            DocumentOrigin::Missing
+        );
+
+        let mut recovered = InstallManifest::load(&manifest_path).unwrap();
+        assert!(recovered
+            .provider_ownership
+            .as_ref()
+            .unwrap()
+            .operations
+            .iter()
+            .any(|operation| operation.phase == OperationPhase::Prepared));
+        recover_provenance(
+            &mut recovered,
+            &TargetArgs {
+                provider: Provider::ClaudeCode,
+                scope: Scope::User,
+            },
+            "icm123",
+            &manifest_path,
+            &lock,
+        )
+        .unwrap();
+        assert!(inspect(&spec, "icm123")
+            .unwrap()
+            .iter()
+            .all(|item| item.exists && !item.blocked));
+        let operation = recovered
+            .provider_ownership
+            .as_ref()
+            .unwrap()
+            .operations
+            .last()
+            .unwrap();
+        assert_eq!(operation.requested.action, OperationAction::Recover);
+        assert_eq!(operation.phase, OperationPhase::Applied);
+        assert!(operation.targets.iter().all(|target| {
+            target.observed_after_hash.as_ref() == Some(&target.expected_after_hash)
+        }));
+    }
+
+    #[test]
+    fn missing_zed_config_retrust_after_strip_preserves_document_origin() {
+        let tmp = tempfile::tempdir().unwrap();
+        let spec = registry_test_spec(Provider::Zed.definition(), Scope::ProjectLocal, tmp.path());
+        let manifest_path = tmp.path().join("install-manifest.json");
+        let lock = InstallManifest::lock(&manifest_path).unwrap();
+        let mut manifest = InstallManifest::empty();
+        manifest.provider_ownership =
+            Some(crate::provider_journal::ProviderOwnership::empty("icm123").unwrap());
+
+        apply_documents(&spec, "icm123", &mut manifest, &manifest_path, &lock).unwrap();
+        let first_bytes = std::fs::read(&spec.documents[0].path).unwrap();
+        assert!(manifest
+            .provider_splices
+            .iter()
+            .all(|record| record.document_origin == DocumentOrigin::Missing));
+
+        strip_documents(
+            Provider::Zed,
+            Scope::ProjectLocal,
+            &spec.documents,
+            RemovalMode::TrustOnly,
+            &mut manifest,
+            &manifest_path,
+            &lock,
+        )
+        .unwrap();
+        assert!(spec.documents[0].path.exists());
+        assert_eq!(manifest.provider_splices.len(), 1);
+        assert_eq!(
+            manifest.provider_splices[0].document_origin,
+            DocumentOrigin::Missing
+        );
+
+        apply_documents(&spec, "icm123", &mut manifest, &manifest_path, &lock).unwrap();
+        assert_eq!(std::fs::read(&spec.documents[0].path).unwrap(), first_bytes);
+        assert!(inspect(&spec, "icm123")
+            .unwrap()
+            .iter()
+            .all(|observation| observation.exists && !observation.blocked));
+        assert!(manifest
+            .provider_splices
+            .iter()
+            .all(|record| record.document_origin == DocumentOrigin::Missing));
+        InstallManifest::load(&manifest_path).unwrap();
+    }
+
+    #[test]
     fn registry_drives_every_provider_and_scope_through_one_lifecycle() {
         let mut scenarios = 0;
         for definition in PROVIDER_REGISTRY {
@@ -4251,6 +4430,23 @@ mod tests {
                     1
                 );
 
+                apply_documents(&spec, server_id, &mut manifest, &manifest_path, &lock).unwrap();
+                assert!(inspect(&spec, server_id)
+                    .unwrap()
+                    .iter()
+                    .all(|item| item.exists && !item.blocked));
+                assert_eq!(
+                    manifest
+                        .provider_ownership
+                        .as_ref()
+                        .unwrap()
+                        .owned_fragments
+                        .iter()
+                        .filter(|fragment| fragment.ownership_kind == OwnershipKind::Owned)
+                        .count(),
+                    owned_count
+                );
+
                 let uninstall = strip_documents(
                     definition.provider,
                     scope,
@@ -4267,7 +4463,7 @@ mod tests {
                         .iter()
                         .map(|outcome| outcome.entries_removed)
                         .sum::<usize>(),
-                    1
+                    owned_count
                 );
                 assert!(inspect(&spec, server_id)
                     .unwrap()
@@ -4311,6 +4507,22 @@ mod tests {
                         }
                     }
                 }
+
+                apply_documents(&spec, server_id, &mut manifest, &manifest_path, &lock).unwrap();
+                assert!(inspect(&spec, server_id)
+                    .unwrap()
+                    .iter()
+                    .all(|item| item.exists && !item.blocked));
+                let retrusted = manifest.provider_ownership.as_ref().unwrap();
+                assert_eq!(retrusted.generation, 5);
+                assert_eq!(
+                    retrusted
+                        .owned_fragments
+                        .iter()
+                        .filter(|fragment| fragment.ownership_kind == OwnershipKind::Owned)
+                        .count(),
+                    owned_count
+                );
             }
         }
         assert_eq!(scenarios, PROVIDER_REGISTRY.len() * Scope::ALL.len());

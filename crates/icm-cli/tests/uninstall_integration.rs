@@ -45,6 +45,27 @@ fn icm_in(home: &Path, cwd: &Path, args: &[&str]) -> std::process::Output {
         .expect("spawn icm")
 }
 
+fn icm_in_with_claude_dir(
+    home: &Path,
+    cwd: &Path,
+    claude_dir: &Path,
+    args: &[&str],
+) -> std::process::Output {
+    Command::new(ICM)
+        .env("HOME", home)
+        .env("CLAUDE_CONFIG_DIR", claude_dir)
+        .env_remove("GEMINI_CONFIG_DIR")
+        .env_remove("CODEX_HOME")
+        .env_remove("COPILOT_HOME")
+        .env_remove("XDG_DATA_HOME")
+        .env_remove("XDG_CACHE_HOME")
+        .env_remove("XDG_CONFIG_HOME")
+        .current_dir(cwd)
+        .args(args)
+        .output()
+        .expect("spawn icm")
+}
+
 fn seed_minimal_residue(home: &Path) {
     // One JSON mcpServers entry.
     write(
@@ -217,6 +238,86 @@ fn uninstall_removes_manifest_owned_provider_values() {
         stdout.contains("Entries removed: 3"),
         "wrong entry count: {stdout}"
     );
+}
+
+#[test]
+fn provider_doctor_and_strip_are_noops_before_first_trust() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let cwd = home.join("proj");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let doctor = icm_in(
+        home,
+        &cwd,
+        &[
+            "provider",
+            "doctor",
+            "--provider",
+            "zed",
+            "--scope",
+            "project-local",
+        ],
+    );
+    assert!(
+        doctor.status.success(),
+        "provider doctor failed: {}",
+        String::from_utf8_lossy(&doctor.stderr)
+    );
+    assert!(String::from_utf8_lossy(&doctor.stdout).contains("\"serverId\":\"icm\""));
+
+    let strip = icm_in(
+        home,
+        &cwd,
+        &[
+            "provider",
+            "strip",
+            "--provider",
+            "zed",
+            "--scope",
+            "project-local",
+            "--yes",
+        ],
+    );
+    assert!(
+        strip.status.success(),
+        "provider strip failed: {}",
+        String::from_utf8_lossy(&strip.stderr)
+    );
+    assert!(!home.join(".local/share/icm/install-manifest.json").exists());
+}
+
+#[test]
+fn claude_user_provider_trust_honors_config_dir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let home = tmp.path();
+    let cwd = home.join("proj");
+    let config_dir = home.join("relocated-claude");
+    std::fs::create_dir_all(&cwd).unwrap();
+
+    let trust = icm_in_with_claude_dir(
+        home,
+        &cwd,
+        &config_dir,
+        &[
+            "provider",
+            "trust",
+            "--provider",
+            "claude-code",
+            "--scope",
+            "user",
+            "--yes",
+        ],
+    );
+    assert!(
+        trust.status.success(),
+        "provider trust failed: {}",
+        String::from_utf8_lossy(&trust.stderr)
+    );
+    assert!(config_dir.join(".claude.json").exists());
+    assert!(config_dir.join("settings.json").exists());
+    assert!(!home.join(".claude.json").exists());
+    assert!(!home.join(".claude/settings.json").exists());
 }
 
 // `directories::ProjectDirs` returns OS-specific data/cache paths that

@@ -2893,6 +2893,110 @@ mod tests {
     }
 
     #[test]
+    fn active_project_resource_is_empty_and_cross_project_isolated_in_2025() {
+        let store = Store::in_memory().unwrap();
+        let mut service = service(&store);
+        service.active_project = Some("test-project".into());
+        let mut state = initialized_state_for_revision(&service, ProtocolRevision::V2025_11_25);
+
+        let read = |service: &McpService<'_>, state: &mut ConnectionState, id| {
+            service
+                .handle(
+                    state,
+                    request(json!({
+                        "jsonrpc":"2.0","id":id,"method":"resources/read",
+                        "params":{"uri":ACTIVE_PROJECT_CONTEXT_URI}
+                    })),
+                )
+                .unwrap()
+                .result
+                .unwrap()
+        };
+        let empty = read(&service, &mut state, 2);
+        assert_eq!(empty["_meta"], json!({"ttlMs":0,"cacheScope":"private"}));
+        let context: Value =
+            serde_json::from_str(empty["contents"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(context["memories"], json!([]));
+        assert_eq!(context["truncated"], false);
+
+        for (topic, summary) in [
+            ("context-test-project", "included"),
+            ("context-other-project", "excluded project"),
+            ("preferences", "excluded global"),
+        ] {
+            store
+                .store(Memory::new(topic.into(), summary.into(), Importance::High))
+                .unwrap();
+        }
+        let populated = read(&service, &mut state, 3);
+        let context: Value =
+            serde_json::from_str(populated["contents"][0]["text"].as_str().unwrap()).unwrap();
+        let memories = context["memories"].as_array().unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0]["summary"], "included");
+    }
+
+    #[test]
+    fn active_project_resource_rejects_bad_uris_and_hides_internal_failures() {
+        let store = Store::in_memory().unwrap();
+        let mut service = service(&store);
+        service.active_project = Some("test-project".into());
+
+        let mut legacy = initialized_state_for_revision(&service, ProtocolRevision::V2024_11_05);
+        let unavailable = service
+            .handle(
+                &mut legacy,
+                request(json!({
+                    "jsonrpc":"2.0","id":2,"method":"resources/read",
+                    "params":{"uri":ACTIVE_PROJECT_CONTEXT_URI}
+                })),
+            )
+            .unwrap();
+        assert_eq!(unavailable.error.unwrap().code, -32601);
+
+        for (id, mut params) in [
+            (3, json!({})),
+            (4, json!({"uri":42})),
+            (
+                5,
+                json!({"uri":"icm://active-project/context?unexpected=1"}),
+            ),
+        ] {
+            params
+                .as_object_mut()
+                .unwrap()
+                .insert("_meta".into(), modern_metadata());
+            let mut modern = ConnectionState::default();
+            let rejected = service
+                .handle(
+                    &mut modern,
+                    request(json!({
+                        "jsonrpc":"2.0","id":id,"method":"resources/read",
+                        "params":params
+                    })),
+                )
+                .unwrap();
+            assert_eq!(rejected.error.unwrap().code, -32602);
+        }
+
+        service.active_project = Some("x".repeat(RESOURCE_MAX_BYTES));
+        let mut modern = ConnectionState::default();
+        let failed = service
+            .handle(
+                &mut modern,
+                request(json!({
+                    "jsonrpc":"2.0","id":6,"method":"resources/read",
+                    "params":{"uri":ACTIVE_PROJECT_CONTEXT_URI,"_meta":modern_metadata()}
+                })),
+            )
+            .unwrap();
+        let error = failed.error.unwrap();
+        assert_eq!(error.code, -32603);
+        assert_eq!(error.message, "failed to read resource");
+        assert!(error.data.is_none());
+    }
+
+    #[test]
     fn explicit_working_directory_scopes_default_recall() {
         let tmp = tempfile::tempdir().unwrap();
         let client_directory = tmp.path().join("client-project");

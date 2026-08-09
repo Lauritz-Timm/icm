@@ -405,7 +405,7 @@ fn forward(
                         Some(session)
                     }
                     Some(_) => return Err("upstream returned an invalid MCP session ID".into()),
-                    None => None,
+                    None => return Err("upstream omitted required MCP session ID".into()),
                 }
             } else {
                 None

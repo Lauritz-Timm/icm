@@ -63,6 +63,81 @@ pub const ACCEPTANCE_THRESHOLD_KEYS: &[&str] = &[
     "retrievalNdcgAt3Minimum",
 ];
 
+const BASELINE_SOURCE_COMMIT: &str = "e2acd39fd9b77619b6ed9f0ee47828c04f9dfb40";
+const BASELINE_EVALUATOR_COMMIT: &str = "20c18d481632df9aa87a79c0d218d96ced03dc25";
+const BASELINE_ROOTS: [&str; 2] = ["<ROOT_WITH_SPACES>", "<ROOT_WITH_UNICODE>"];
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BaselineFile {
+    receipt: BaselineReceipt,
+    latency_micros: BaselineLatencyMetrics,
+    payload_wire_bytes: BaselinePayloadWireBytes,
+    retrieval: BaselineRetrievalMetrics,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BaselineLatencyMetrics {
+    #[serde(rename = "tools/list")]
+    tools_list: BaselineLatency,
+    #[serde(rename = "memory/recall")]
+    memory_recall: BaselineLatency,
+    #[serde(rename = "memory/stats")]
+    memory_stats: BaselineLatency,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BaselineLatency {
+    median: u64,
+    p95: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BaselinePayloadWireBytes {
+    #[serde(rename = "tools/list")]
+    tools_list: u64,
+    #[serde(rename = "memory/recall")]
+    memory_recall: u64,
+    #[serde(rename = "memory/stats")]
+    memory_stats: u64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BaselineRetrievalMetrics {
+    hit_at_3: f64,
+    recall_at_3: f64,
+    ndcg_at_3: f64,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BaselineReceipt {
+    receipt_version: u64,
+    mode: String,
+    source_commit: String,
+    candidate_sha256: String,
+    evaluator_commit: String,
+    design_version: u64,
+    scenario_count: usize,
+    status_counts: BTreeMap<String, usize>,
+    legacy_golden_sha256: String,
+    normalized_report_sha256: String,
+    raw_exchanges: Vec<BaselineRawExchange>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct BaselineRawExchange {
+    root: String,
+    sha256: String,
+    bytes: u64,
+    lines: u64,
+}
+
 pub fn verify(suite_root: &Path) -> Result<DesignVerification> {
     let design: Value = read_json(&suite_root.join("contracts/preregistered-design.json"))?;
     let design_version = design
@@ -195,6 +270,9 @@ pub fn verify(suite_root: &Path) -> Result<DesignVerification> {
     {
         anyhow::bail!("legacy golden hash manifest is incomplete or malformed");
     }
+    let legacy_golden_sha256 =
+        sha256_file(&suite_root.join("goldens/legacy-baseline.sha256.json"))?;
+    verify_baseline_receipt(suite_root, &design, scenarios.len(), &legacy_golden_sha256)?;
     Ok(DesignVerification {
         design_version,
         fixture_hashes,
@@ -473,6 +551,154 @@ fn verify_contracts(suite_root: &Path, design: &Value) -> Result<BTreeMap<String
     Ok(hashes)
 }
 
+fn verify_baseline_receipt(
+    suite_root: &Path,
+    design: &Value,
+    scenario_count: usize,
+    legacy_golden_sha256: &str,
+) -> Result<()> {
+    let path = suite_root.join("goldens/baseline-metrics.json");
+    let expected_sha256 = design
+        .get("baselineMetricsSha256")
+        .and_then(Value::as_str)
+        .context("baselineMetricsSha256 missing from preregistered design")?;
+    validate_digest("baseline metrics", expected_sha256, 64)?;
+    let actual_sha256 = sha256_file(&path)?;
+    if actual_sha256 != expected_sha256 {
+        anyhow::bail!(
+            "baseline metrics hash differs from the preregistered design: expected {expected_sha256}, got {actual_sha256}"
+        );
+    }
+    let file: BaselineFile = serde_json::from_slice(
+        &fs::read(&path).with_context(|| format!("reading {}", path.display()))?,
+    )
+    .with_context(|| format!("parsing {}", path.display()))?;
+    validate_baseline_metrics(&file)?;
+    validate_baseline_receipt(&file.receipt, scenario_count, legacy_golden_sha256)
+}
+
+fn validate_baseline_metrics(file: &BaselineFile) -> Result<()> {
+    let latencies = [
+        &file.latency_micros.tools_list,
+        &file.latency_micros.memory_recall,
+        &file.latency_micros.memory_stats,
+    ];
+    if latencies
+        .iter()
+        .any(|metrics| metrics.median == 0 || metrics.p95 == 0)
+    {
+        anyhow::bail!("baseline latency metrics must be positive");
+    }
+    if [
+        file.payload_wire_bytes.tools_list,
+        file.payload_wire_bytes.memory_recall,
+        file.payload_wire_bytes.memory_stats,
+    ]
+    .contains(&0)
+    {
+        anyhow::bail!("baseline payload wire metrics must be positive");
+    }
+    let retrieval = [
+        file.retrieval.hit_at_3,
+        file.retrieval.recall_at_3,
+        file.retrieval.ndcg_at_3,
+    ];
+    if retrieval
+        .iter()
+        .any(|metric| !metric.is_finite() || !(0.0..=1.0).contains(metric))
+    {
+        anyhow::bail!("baseline retrieval metrics must be finite fractions");
+    }
+    Ok(())
+}
+
+fn validate_baseline_receipt(
+    receipt: &BaselineReceipt,
+    scenario_count: usize,
+    legacy_golden_sha256: &str,
+) -> Result<()> {
+    if receipt.receipt_version != 1 {
+        anyhow::bail!("baseline receipt version must be 1");
+    }
+    if receipt.mode != "record-baseline" {
+        anyhow::bail!("baseline receipt mode must be record-baseline");
+    }
+    if receipt.source_commit != BASELINE_SOURCE_COMMIT {
+        anyhow::bail!(
+            "baseline source commit differs: expected {BASELINE_SOURCE_COMMIT}, got {}",
+            receipt.source_commit
+        );
+    }
+    validate_digest("baseline candidate", &receipt.candidate_sha256, 64)?;
+    validate_digest("baseline evaluator commit", &receipt.evaluator_commit, 40)?;
+    if receipt.evaluator_commit != BASELINE_EVALUATOR_COMMIT {
+        anyhow::bail!(
+            "baseline evaluator commit differs: expected {BASELINE_EVALUATOR_COMMIT}, got {}",
+            receipt.evaluator_commit
+        );
+    }
+    if receipt.design_version != 12 {
+        anyhow::bail!("baseline receipt designVersion must be 12");
+    }
+    if receipt.scenario_count != scenario_count || receipt.scenario_count != 294 {
+        anyhow::bail!(
+            "baseline receipt scenario count differs: expected {scenario_count}, got {}",
+            receipt.scenario_count
+        );
+    }
+    if receipt.status_counts
+        != BTreeMap::from([
+            ("FAIL".to_owned(), 21),
+            ("PASS".to_owned(), 62),
+            ("UNSUPPORTED_BASELINE".to_owned(), 211),
+        ])
+    {
+        anyhow::bail!("baseline receipt status counts differ from the frozen observation");
+    }
+    if receipt.status_counts.values().sum::<usize>() != receipt.scenario_count {
+        anyhow::bail!("baseline receipt status counts do not sum to scenario count");
+    }
+    validate_digest("baseline legacy golden", &receipt.legacy_golden_sha256, 64)?;
+    if receipt.legacy_golden_sha256 != legacy_golden_sha256 {
+        anyhow::bail!("baseline receipt legacy golden hash differs from the verified golden");
+    }
+    validate_digest(
+        "baseline normalized report",
+        &receipt.normalized_report_sha256,
+        64,
+    )?;
+    if receipt.raw_exchanges.len() != BASELINE_ROOTS.len() {
+        anyhow::bail!("baseline receipt must contain two raw-exchange records");
+    }
+    for (exchange, expected_root) in receipt.raw_exchanges.iter().zip(BASELINE_ROOTS) {
+        if exchange.root != expected_root {
+            anyhow::bail!(
+                "baseline raw-exchange root differs: expected {expected_root}, got {}",
+                exchange.root
+            );
+        }
+        validate_digest("baseline raw exchanges", &exchange.sha256, 64)?;
+        if exchange.bytes == 0 || exchange.lines == 0 {
+            anyhow::bail!("baseline raw-exchange size metadata must be nonzero");
+        }
+    }
+    Ok(())
+}
+
+fn validate_digest(label: &str, value: &str, length: usize) -> Result<()> {
+    if !is_lower_hex(value, length) {
+        anyhow::bail!("{label} is not a lowercase {length}-character SHA-256/commit digest");
+    }
+    Ok(())
+}
+
+fn is_lower_hex(value: &str, length: usize) -> bool {
+    value.len() == length
+        && value
+            .chars()
+            .all(|character| character.is_ascii_hexdigit() && !character.is_ascii_uppercase())
+}
+
 fn verify_product_independence(suite_root: &Path) -> Result<()> {
     let cargo = fs::read_to_string(suite_root.join("Cargo.toml"))?;
     let parsed: toml::Value = cargo.parse()?;
@@ -662,4 +888,36 @@ fn verify_unique(values: &[String], label: &str) -> Result<()> {
 fn read_json(path: &Path) -> Result<Value> {
     let bytes = fs::read(path).with_context(|| format!("reading {}", path.display()))?;
     serde_json::from_slice(&bytes).with_context(|| format!("parsing {}", path.display()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file() -> BaselineFile {
+        serde_json::from_str(include_str!("../goldens/baseline-metrics.json")).unwrap()
+    }
+
+    #[test]
+    fn baseline_receipt_rejects_unknown_fields() {
+        let mut value: Value =
+            serde_json::from_str(include_str!("../goldens/baseline-metrics.json")).unwrap();
+        value
+            .as_object_mut()
+            .unwrap()
+            .insert("unexpected".to_owned(), Value::Bool(true));
+        assert!(serde_json::from_value::<BaselineFile>(value).is_err());
+    }
+
+    #[test]
+    fn baseline_receipt_rejects_tampered_digest() {
+        let mut value = file();
+        value.receipt.normalized_report_sha256 = "bad".to_owned();
+        assert!(validate_baseline_receipt(
+            &value.receipt,
+            value.receipt.scenario_count,
+            &value.receipt.legacy_golden_sha256,
+        )
+        .is_err());
+    }
 }

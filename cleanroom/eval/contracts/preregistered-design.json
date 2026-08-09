@@ -1,6 +1,7 @@
 {
   "designVersion": 12,
   "scenarioCount": 294,
+  "baselineMetricsSha256": "3f4344410fa698275a20b9a31969974a299c304114c9eb795548bb210bf3afe5",
   "provenance": {
     "initialDesignFrozenAt": "2026-08-05",
     "initialDesignFrozenBeforeReplacementImplementation": true,

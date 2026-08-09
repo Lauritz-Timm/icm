@@ -87,13 +87,8 @@ pub fn verify_canaries_since(checkpoint: usize) -> Result<()> {
     let records = canary_registry()
         .lock()
         .map_err(|_| anyhow::anyhow!("canary registry lock poisoned"))?
-        .get(checkpoint..)
-        .context("invalid canary registry checkpoint")?
         .to_vec();
-    for record in records {
-        verify_canary_record(&record)?;
-    }
-    Ok(())
+    verify_canary_records(&records, checkpoint)
 }
 
 #[derive(Debug, Clone, Default)]
@@ -124,15 +119,13 @@ impl UserStatePaths {
             "XDG_CONFIG_HOME",
             "XDG_CACHE_HOME",
             "XDG_DATA_HOME",
+            "CODEX_HOME",
+            "CLAUDE_CONFIG_DIR",
+            "ICM_CONFIG",
         ];
         for key in explicit_state_keys {
             if let Some(value) = env::var_os(key) {
-                let path = resolve_intent(Path::new(&value))?;
-                state_dirs.insert(path);
-                let text = value.to_string_lossy().into_owned();
-                if text.len() > 3 {
-                    leak_strings.insert(text);
-                }
+                add_explicit_state_path(key, &value, &mut state_dirs, &mut leak_strings)?;
             }
         }
         add_standard_state_defaults(
@@ -142,6 +135,9 @@ impl UserStatePaths {
             env::var_os("XDG_CACHE_HOME").is_none(),
             env::var_os("XDG_DATA_HOME").is_none(),
         )?;
+        for path in add_provider_state_defaults(&homes, &mut state_dirs)? {
+            add_leak_string(&mut leak_strings, &path);
+        }
         Ok(Self {
             homes: homes.into_iter().collect(),
             state_dirs: state_dirs.into_iter().collect(),
@@ -212,11 +208,43 @@ impl UserStatePaths {
         let homes: BTreeSet<_> = homes.into_iter().collect();
         let mut state_dirs = BTreeSet::new();
         add_standard_state_defaults(&homes, &mut state_dirs, true, true, true).unwrap();
+        let provider_paths = add_provider_state_defaults(&homes, &mut state_dirs).unwrap();
         Self {
             homes: homes.into_iter().collect(),
             state_dirs: state_dirs.into_iter().collect(),
-            leak_strings: Vec::new(),
+            leak_strings: provider_paths
+                .into_iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
         }
+    }
+}
+
+fn add_explicit_state_path(
+    key: &str,
+    value: &std::ffi::OsStr,
+    state_dirs: &mut BTreeSet<PathBuf>,
+    leak_strings: &mut BTreeSet<String>,
+) -> Result<()> {
+    let path = resolve_intent(Path::new(value))?;
+    state_dirs.insert(path.clone());
+    if key == "ICM_CONFIG" {
+        if let Some(parent) = path.parent() {
+            state_dirs.insert(parent.to_path_buf());
+        }
+    }
+    add_leak_string(leak_strings, &path);
+    let raw = value.to_string_lossy();
+    if raw.len() > 3 {
+        leak_strings.insert(raw.into_owned());
+    }
+    Ok(())
+}
+
+fn add_leak_string(leak_strings: &mut BTreeSet<String>, path: &Path) {
+    let text = path.to_string_lossy();
+    if text.len() > 3 {
+        leak_strings.insert(text.into_owned());
     }
 }
 
@@ -243,6 +271,21 @@ fn add_standard_state_defaults(
         state_dirs.insert(resolve_intent(&home.join("Library").join("Caches"))?);
     }
     Ok(())
+}
+
+fn add_provider_state_defaults(
+    homes: &BTreeSet<PathBuf>,
+    state_dirs: &mut BTreeSet<PathBuf>,
+) -> Result<Vec<PathBuf>> {
+    let mut provider_paths = Vec::new();
+    for home in homes {
+        for relative in [".codex", ".claude", ".cursor"] {
+            let path = resolve_intent(&home.join(relative))?;
+            state_dirs.insert(path.clone());
+            provider_paths.push(path);
+        }
+    }
+    Ok(provider_paths)
 }
 
 impl ScenarioSandbox {
@@ -407,11 +450,17 @@ impl ScenarioSandbox {
     }
 
     pub fn verify_nondisclosure(&self, text: &str) -> Result<()> {
-        if text
-            .as_bytes()
-            .windows(self.canary_secret.len())
-            .any(|window| window == self.canary_secret.as_bytes())
-        {
+        let secrets: Vec<String> = {
+            let registry = canary_registry()
+                .lock()
+                .map_err(|_| anyhow::anyhow!("canary registry lock poisoned"))?;
+            registry
+                .iter()
+                .map(|record| record.secret.clone())
+                .chain(std::iter::once(self.canary_secret.clone()))
+                .collect()
+        };
+        if contains_any_secret(text.as_bytes(), &secrets) {
             anyhow::bail!("synthetic canary secret appeared in candidate capture");
         }
         Ok(())
@@ -579,11 +628,21 @@ pub fn validate_runner_roots(
 }
 
 fn reject_git_workspace(workspace: &Path) -> Result<()> {
-    if workspace.join(".git").try_exists()? {
-        anyhow::bail!(
-            "workspace must not be a Git worktree: {} contains .git",
-            workspace.display()
-        );
+    let mut ancestor = workspace;
+    loop {
+        if ancestor.join(".git").try_exists()? {
+            anyhow::bail!(
+                "workspace must not be below a Git worktree: {} contains .git",
+                ancestor.display()
+            );
+        }
+        let Some(parent) = ancestor.parent() else {
+            break;
+        };
+        if parent == ancestor {
+            break;
+        }
+        ancestor = parent;
     }
     Ok(())
 }
@@ -651,15 +710,15 @@ fn parse_http_socket_address(value: &str) -> Result<SocketAddr> {
         .with_context(|| format!("configured proxy has invalid socket address: {value}"))
 }
 
-fn scan_tree_for_secret(root: &Path, secret: &[u8]) -> Result<()> {
+fn scan_tree_for_secrets(root: &Path, secrets: &[String]) -> Result<()> {
     let mut files = 0_usize;
     let mut bytes = 0_u64;
-    scan_tree_for_secret_bounded(root, secret, &mut files, &mut bytes)
+    scan_tree_for_secrets_bounded(root, secrets, &mut files, &mut bytes)
 }
 
-fn scan_tree_for_secret_bounded(
+fn scan_tree_for_secrets_bounded(
     root: &Path,
-    secret: &[u8],
+    secrets: &[String],
     files: &mut usize,
     bytes: &mut u64,
 ) -> Result<()> {
@@ -675,7 +734,7 @@ fn scan_tree_for_secret_bounded(
             );
         }
         if metadata.is_dir() {
-            scan_tree_for_secret_bounded(&entry.path(), secret, files, bytes)?;
+            scan_tree_for_secrets_bounded(&entry.path(), secrets, files, bytes)?;
         } else if metadata.is_file() {
             *files += 1;
             *bytes = bytes.saturating_add(metadata.len());
@@ -691,7 +750,7 @@ fn scan_tree_for_secret_bounded(
                 );
             }
             let bytes = fs::read(entry.path())?;
-            if bytes.windows(secret.len()).any(|window| window == secret) {
+            if contains_any_secret(&bytes, secrets) {
                 anyhow::bail!(
                     "synthetic canary secret appeared in candidate artifact {}",
                     entry.path().display()
@@ -702,12 +761,45 @@ fn scan_tree_for_secret_bounded(
     Ok(())
 }
 
-fn verify_canary_record(record: &CanaryRecord) -> Result<()> {
+fn contains_any_secret(bytes: &[u8], secrets: &[String]) -> bool {
+    secrets.iter().any(|secret| {
+        let secret = secret.as_bytes();
+        !secret.is_empty() && bytes.windows(secret.len()).any(|window| window == secret)
+    })
+}
+
+fn verify_canary_records(records: &[CanaryRecord], checkpoint: usize) -> Result<()> {
+    let new_records = records
+        .get(checkpoint..)
+        .context("invalid canary registry checkpoint")?;
+    for record in records {
+        verify_canary_hash(record)?;
+    }
+
+    let secrets: BTreeSet<String> = records.iter().map(|record| record.secret.clone()).collect();
+    let secrets: Vec<String> = secrets.into_iter().collect();
+    let roots: BTreeSet<PathBuf> = new_records
+        .iter()
+        .map(|record| record.root.clone())
+        .collect();
+    for root in roots {
+        scan_tree_for_secrets(&root, &secrets)?;
+    }
+    Ok(())
+}
+
+fn verify_canary_hash(record: &CanaryRecord) -> Result<()> {
     let current_canary = sha256_file(&record.path)?;
     if current_canary != record.hash {
         anyhow::bail!("contamination canary changed: {}", record.path.display());
     }
-    scan_tree_for_secret(&record.root, record.secret.as_bytes())
+    Ok(())
+}
+
+fn verify_canary_record(record: &CanaryRecord) -> Result<()> {
+    verify_canary_hash(record)?;
+    let secrets = std::slice::from_ref(&record.secret);
+    scan_tree_for_secrets(&record.root, secrets)
 }
 
 pub fn ensure_lexically_within(path: &Path, root: &Path) -> Result<()> {
@@ -893,6 +985,89 @@ mod tests {
     }
 
     #[test]
+    fn provider_state_paths_are_rejected_and_detected_in_leaks() {
+        let root = TestRoot::new();
+        let home = root.0.join("home");
+        fs::create_dir_all(&home).unwrap();
+
+        let codex_home = home.join("custom-codex");
+        let claude_config = home.join("custom-claude");
+        let icm_config = home.join("config").join("icm.toml");
+        for path in [
+            codex_home.as_path(),
+            claude_config.as_path(),
+            icm_config.parent().unwrap(),
+        ] {
+            fs::create_dir_all(path).unwrap();
+        }
+        fs::write(&icm_config, "[memory]\n").unwrap();
+
+        let mut state_dirs = BTreeSet::new();
+        let mut leak_strings = BTreeSet::new();
+        for (key, path) in [
+            ("CODEX_HOME", codex_home.as_path()),
+            ("CLAUDE_CONFIG_DIR", claude_config.as_path()),
+            ("ICM_CONFIG", icm_config.as_path()),
+        ] {
+            add_explicit_state_path(key, path.as_os_str(), &mut state_dirs, &mut leak_strings)
+                .unwrap();
+        }
+        let state = UserStatePaths {
+            homes: vec![home],
+            state_dirs: state_dirs.into_iter().collect(),
+            leak_strings: leak_strings.into_iter().collect(),
+        };
+
+        for path in [
+            codex_home.as_path(),
+            claude_config.as_path(),
+            icm_config.parent().unwrap(),
+        ] {
+            let workspace = path.join("evaluation-workspace");
+            fs::create_dir_all(&workspace).unwrap();
+            let error = validate_runner_roots(
+                &workspace,
+                &workspace.join("suite"),
+                &workspace.join("candidate"),
+                &workspace.join("work"),
+                &workspace.join("evidence"),
+                &state,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("user-state"));
+        }
+        let output = format!("{codex_home:?} {claude_config:?} {icm_config:?}");
+        assert!(scan_for_real_path_leaks(&output, state.leak_strings()).is_err());
+    }
+
+    #[test]
+    fn provider_default_state_paths_are_rejected_and_detected_in_leaks() {
+        let root = TestRoot::new();
+        let home = root.0.join("home");
+        fs::create_dir_all(&home).unwrap();
+        let state = UserStatePaths::synthetic_with_standard_defaults(vec![home.clone()]);
+
+        for relative in [".codex", ".claude", ".cursor"] {
+            let workspace = home.join(relative).join("evaluation-workspace");
+            fs::create_dir_all(&workspace).unwrap();
+            let error = validate_runner_roots(
+                &workspace,
+                &workspace.join("suite"),
+                &workspace.join("candidate"),
+                &workspace.join("work"),
+                &workspace.join("evidence"),
+                &state,
+            )
+            .unwrap_err();
+            assert!(error.to_string().contains("user-state"));
+            assert!(
+                scan_for_real_path_leaks(&workspace.to_string_lossy(), state.leak_strings(),)
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn overlapping_work_and_evidence_are_rejected() {
         let root = TestRoot::new();
         let workspace = root.0.join("workspace");
@@ -929,11 +1104,36 @@ mod tests {
     }
 
     #[test]
+    fn workspace_below_git_worktree_is_rejected() {
+        let root = TestRoot::new();
+        let repository = root.0.join("repository");
+        let workspace = repository.join("cleanroom").join("workspace");
+        fs::create_dir_all(repository.join(".git")).unwrap();
+        fs::create_dir_all(&workspace).unwrap();
+        let state = UserStatePaths::synthetic(vec![], vec![]);
+        let error = validate_runner_roots(
+            &workspace,
+            &workspace.join("suite"),
+            &workspace.join("candidate"),
+            &workspace.join("work"),
+            &workspace.join("evidence"),
+            &state,
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains(".git"));
+    }
+
+    #[test]
     fn canary_exposure_in_capture_or_any_scenario_file_is_detected() {
         let root = TestRoot::new();
         let sandbox =
             ScenarioSandbox::create(&root.0.join("work"), "run", "scenario", false).unwrap();
+        let other_sandbox =
+            ScenarioSandbox::create(&root.0.join("work"), "run", "other", false).unwrap();
         assert!(sandbox
+            .verify_nondisclosure(&sandbox.canary_secret)
+            .is_err());
+        assert!(other_sandbox
             .verify_nondisclosure(&sandbox.canary_secret)
             .is_err());
         fs::write(
@@ -942,6 +1142,41 @@ mod tests {
         )
         .unwrap();
         assert!(sandbox.verify().is_err());
+    }
+
+    #[test]
+    fn all_registered_canaries_are_verified_and_new_roots_scan_all_secrets() {
+        let root = TestRoot::new();
+        let old_root = root.0.join("old");
+        let new_root = root.0.join("new");
+        fs::create_dir_all(&old_root).unwrap();
+        fs::create_dir_all(&new_root).unwrap();
+        let old_path = root.0.join("old.sentinel");
+        let new_path = root.0.join("new.sentinel");
+        let old_secret = "OLD_REGISTERED_CANARY";
+        let new_secret = "NEW_REGISTERED_CANARY";
+        fs::write(&old_path, format!("{old_secret}\n")).unwrap();
+        fs::write(&new_path, format!("{new_secret}\n")).unwrap();
+        let records = vec![
+            CanaryRecord {
+                root: old_root,
+                path: old_path.clone(),
+                hash: sha256_file(&old_path).unwrap(),
+                secret: old_secret.to_owned(),
+            },
+            CanaryRecord {
+                root: new_root.clone(),
+                path: new_path.clone(),
+                hash: sha256_file(&new_path).unwrap(),
+                secret: new_secret.to_owned(),
+            },
+        ];
+        fs::write(new_root.join("captured.txt"), old_secret).unwrap();
+        assert!(verify_canary_records(&records, 1).is_err());
+
+        fs::remove_file(new_root.join("captured.txt")).unwrap();
+        fs::write(&old_path, "tampered\n").unwrap();
+        assert!(verify_canary_records(&records, 1).is_err());
     }
 
     #[test]

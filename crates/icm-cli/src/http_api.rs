@@ -1925,9 +1925,14 @@ mod tests {
             .await
             .unwrap();
         let body: Value = serde_json::from_slice(&body).unwrap();
-        let text = body["result"]["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("from client"));
-        assert!(!text.contains("from other"));
+        if let Some(memories) = body["result"]["structuredContent"]["memories"].as_array() {
+            assert_eq!(memories.len(), 1);
+            assert_eq!(memories[0]["summary"], "shared marker from client");
+        } else {
+            let text = body["result"]["content"][0]["text"].as_str().unwrap();
+            assert!(text.contains("from client"));
+            assert!(!text.contains("from other"));
+        }
 
         let mut drift_headers = session_headers.clone();
         drift_headers.insert(

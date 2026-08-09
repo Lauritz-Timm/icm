@@ -367,12 +367,13 @@ pub enum DispatchResult {
 pub struct ToolCatalog {
     registrations: Vec<ToolSpec>,
     by_name: HashMap<&'static str, usize>,
+    has_embedder: bool,
     legacy_list: Value,
     modern_list: Value,
 }
 
 impl ToolCatalog {
-    pub fn new(mut registrations: Vec<ToolSpec>, has_embedder: bool) -> Result<Self, String> {
+    pub fn new(registrations: Vec<ToolSpec>, has_embedder: bool) -> Result<Self, String> {
         let mut names = HashSet::with_capacity(registrations.len());
         for registration in &registrations {
             if !names.insert(registration.name) {
@@ -383,7 +384,6 @@ impl ToolCatalog {
             }
         }
 
-        registrations.retain(|registration| registration.requirements.is_available(has_embedder));
         let by_name = registrations
             .iter()
             .enumerate()
@@ -392,17 +392,22 @@ impl ToolCatalog {
 
         let legacy_tools: Vec<Value> = registrations
             .iter()
-            .filter(|registration| registration.requirements.legacy_visible)
+            .filter(|registration| {
+                registration.requirements.legacy_visible
+                    && registration.requirements.is_available(has_embedder)
+            })
             .map(ToolSpec::legacy_definition)
             .collect();
         let modern_tools: Vec<Value> = registrations
             .iter()
+            .filter(|registration| registration.requirements.is_available(has_embedder))
             .map(ToolSpec::modern_definition)
             .collect();
 
         Ok(Self {
             registrations,
             by_name,
+            has_embedder,
             legacy_list: json!({ "tools": legacy_tools }),
             modern_list: json!({ "tools": modern_tools }),
         })
@@ -427,6 +432,11 @@ impl ToolCatalog {
             return DispatchResult::UnknownTool;
         };
         let registration = &self.registrations[*index];
+        if validation == InputValidation::Modern
+            && !registration.requirements.is_available(self.has_embedder)
+        {
+            return DispatchResult::UnknownTool;
+        }
         let normalized_arguments = matches!(
             validation,
             InputValidation::Legacy2024Unchecked | InputValidation::Legacy2024

@@ -229,7 +229,11 @@ impl<'a> McpService<'a> {
                         ProtocolEra::PerRequest,
                     );
                 }
-                if let Err(response) = validate_legacy_request(id.clone(), message) {
+                if let Err(response) = validate_legacy_request(
+                    id.clone(),
+                    message,
+                    revision == ProtocolRevision::V2024_11_05,
+                ) {
                     return *response;
                 }
                 if method == "ping" {
@@ -252,7 +256,11 @@ impl<'a> McpService<'a> {
                         ProtocolEra::PerRequest,
                     )
                 } else {
-                    if let Err(response) = validate_legacy_request(id.clone(), message) {
+                    if let Err(response) = validate_legacy_request(
+                        id.clone(),
+                        message,
+                        revision == ProtocolRevision::V2024_11_05,
+                    ) {
                         return *response;
                     }
                     self.dispatch(state, id, revision, method, message)
@@ -334,7 +342,7 @@ impl<'a> McpService<'a> {
         id: Value,
         message: &JsonRpcMessage,
     ) -> JsonRpcResponse {
-        if let Err(response) = validate_legacy_request(id.clone(), message) {
+        if let Err(response) = validate_legacy_request(id.clone(), message, false) {
             return *response;
         }
         let Some(params) = message.params.as_ref().and_then(Value::as_object) else {
@@ -525,9 +533,12 @@ impl<'a> McpService<'a> {
         revision: ProtocolRevision,
         message: &JsonRpcMessage,
     ) -> JsonRpcResponse {
-        let Some(params) = message.params.as_ref().and_then(Value::as_object) else {
+        let Some(params) = message.params.as_ref() else {
             return JsonRpcResponse::err(id, -32602, "missing params".into());
         };
+        if revision != ProtocolRevision::V2024_11_05 && !params.is_object() {
+            return JsonRpcResponse::err(id, -32602, "missing params".into());
+        }
         let Some(name) = params.get("name").and_then(Value::as_str) else {
             return JsonRpcResponse::err(id, -32602, "missing tool name".into());
         };
@@ -535,7 +546,7 @@ impl<'a> McpService<'a> {
             .get("arguments")
             .cloned()
             .unwrap_or_else(|| json!({}));
-        if !arguments.is_object() {
+        if revision != ProtocolRevision::V2024_11_05 && !arguments.is_object() {
             return JsonRpcResponse::err(id, -32602, "tool arguments must be an object".into());
         }
 
@@ -551,10 +562,10 @@ impl<'a> McpService<'a> {
             compact: self.compact,
             auto_consolidate: self.auto_consolidate,
             working_directory: &self.working_directory,
-            enforce_directory_boundary: true,
+            enforce_directory_boundary: revision != ProtocolRevision::V2024_11_05,
         };
         let validation = if revision == ProtocolRevision::V2024_11_05 {
-            InputValidation::Legacy2024
+            InputValidation::Legacy2024Unchecked
         } else {
             InputValidation::Modern
         };
@@ -676,6 +687,7 @@ fn requests_modern_era(message: &JsonRpcMessage) -> bool {
 fn validate_legacy_request(
     id: Value,
     message: &JsonRpcMessage,
+    allow_non_object_params: bool,
 ) -> Result<(), Box<JsonRpcResponse>> {
     if message.extra.contains_key("_meta") {
         return Err(invalid_params(
@@ -687,6 +699,9 @@ fn validate_legacy_request(
         return Ok(());
     };
     let Some(params) = params.as_object() else {
+        if allow_non_object_params {
+            return Ok(());
+        }
         return Err(invalid_params(id, "request params must be an object"));
     };
     let Some(raw_metadata) = params.get("_meta") else {
@@ -2625,11 +2640,7 @@ mod tests {
             if revision == ProtocolRevision::V2024_11_05 {
                 assert!(response.error.is_none());
                 let result = response.result.unwrap();
-                assert_eq!(result["isError"], true);
-                assert!(result["content"][0]["text"]
-                    .as_str()
-                    .unwrap()
-                    .starts_with("invalid arguments: "));
+                assert_ne!(result["isError"], true);
             } else {
                 assert!(response.result.is_none());
                 let error = response.error.unwrap();
@@ -2861,7 +2872,16 @@ mod tests {
                 })),
             )
             .unwrap();
-        assert_eq!(legacy_bad_type.result.unwrap()["isError"], true);
+        let legacy_bad_type = legacy_bad_type.result.unwrap();
+        assert_ne!(legacy_bad_type["isError"], true);
+        assert_eq!(
+            legacy_bad_type["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .matches("revision limit probe")
+                .count(),
+            5
+        );
 
         let mut modern_state = ConnectionState::default();
         let accepted = service
@@ -2928,6 +2948,24 @@ mod tests {
             .unwrap();
         assert!(modern_unknown.result.is_none());
         assert_eq!(modern_unknown.error.unwrap().code, -32602);
+
+        let modern_bad_type = service
+            .handle(
+                &mut modern_state,
+                request(json!({
+                    "jsonrpc":"2.0","id":11,"method":"tools/call",
+                    "params":{
+                        "name":"icm_memory_recall",
+                        "arguments":{
+                            "query":"revision limit probe","project":"","limit":"2"
+                        },
+                        "_meta":modern_metadata()
+                    }
+                })),
+            )
+            .unwrap();
+        assert!(modern_bad_type.result.is_none());
+        assert_eq!(modern_bad_type.error.unwrap().code, -32602);
     }
 
     #[test]
@@ -2993,10 +3031,34 @@ mod tests {
                 "isError":true
             })
         );
+
+        let non_object_arguments = service
+            .handle(
+                &mut state,
+                request(json!({
+                    "jsonrpc":"2.0","id":3,"method":"tools/call",
+                    "params":{"name":"icm_memory_stats","arguments":[]}
+                })),
+            )
+            .unwrap();
+        assert!(non_object_arguments.error.is_none());
+        assert_ne!(non_object_arguments.result.unwrap()["isError"], true);
+
+        let non_object_params = service
+            .handle(
+                &mut state,
+                request(json!({
+                    "jsonrpc":"2.0","id":4,"method":"tools/call","params":[]
+                })),
+            )
+            .unwrap();
+        let error = non_object_params.error.unwrap();
+        assert_eq!(error.code, -32602);
+        assert_eq!(error.message, "missing tool name");
     }
 
     #[test]
-    fn unavailable_embedder_tool_stays_hidden_from_service_listing_and_dispatch() {
+    fn unavailable_embedder_tool_stays_hidden_but_preserves_legacy_dispatch() {
         let store = Store::in_memory().unwrap();
         let service = service(&store);
         let mut state = initialized_state_for_revision(&service, ProtocolRevision::V2024_11_05);
@@ -3029,11 +3091,79 @@ mod tests {
             json!({
                 "content":[{
                     "type":"text",
-                    "text":"unknown tool: icm_memory_embed_all"
+                    "text":"embeddings not available"
                 }],
                 "isError":true
             })
         );
+
+        let mut modern = initialized_state_for_revision(&service, ProtocolRevision::V2025_11_25);
+        let modern_called = service
+            .handle(
+                &mut modern,
+                request(json!({
+                    "jsonrpc":"2.0","id":4,"method":"tools/call",
+                    "params":{"name":"icm_memory_embed_all","arguments":{}}
+                })),
+            )
+            .unwrap();
+        assert_eq!(modern_called.error.unwrap().code, -32602);
+    }
+
+    #[test]
+    fn legacy_learn_keeps_caller_selected_paths_while_modern_stays_bounded() {
+        let root = tempfile::tempdir().unwrap();
+        let working_directory = root.path().join("server-project");
+        let external_directory = root.path().join("external-project");
+        std::fs::create_dir(&working_directory).unwrap();
+        std::fs::create_dir(&external_directory).unwrap();
+        std::fs::write(
+            external_directory.join("Cargo.toml"),
+            "[package]\nname='external-project'\nversion='0.1.0'\n",
+        )
+        .unwrap();
+
+        let store = Store::in_memory().unwrap();
+        let service = McpService::with_working_directory(
+            &store,
+            None,
+            false,
+            AutoConsolidate::default(),
+            working_directory,
+        );
+        let arguments = json!({"directory":external_directory});
+
+        let mut legacy = initialized_state_for_revision(&service, ProtocolRevision::V2024_11_05);
+        let accepted = service
+            .handle(
+                &mut legacy,
+                request(json!({
+                    "jsonrpc":"2.0","id":2,"method":"tools/call",
+                    "params":{"name":"icm_learn","arguments":arguments}
+                })),
+            )
+            .unwrap()
+            .result
+            .unwrap();
+        assert_ne!(accepted["isError"], true);
+
+        let mut modern = initialized_state_for_revision(&service, ProtocolRevision::V2025_11_25);
+        let rejected = service
+            .handle(
+                &mut modern,
+                request(json!({
+                    "jsonrpc":"2.0","id":3,"method":"tools/call",
+                    "params":{"name":"icm_learn","arguments":arguments}
+                })),
+            )
+            .unwrap()
+            .result
+            .unwrap();
+        assert_eq!(rejected["isError"], true);
+        assert!(rejected["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("within the server working directory"));
     }
 
     #[test]

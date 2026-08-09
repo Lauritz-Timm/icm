@@ -293,8 +293,32 @@ pub async fn run_http_server(
     }
     eprintln!("[icm http] listening on http://{local}");
 
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
     Ok(())
+}
+
+#[cfg(unix)]
+async fn shutdown_signal() {
+    let ctrl_c = tokio::signal::ctrl_c();
+    let mut terminate =
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(signal) => signal,
+            Err(_) => {
+                let _ = ctrl_c.await;
+                return;
+            }
+        };
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate.recv() => {},
+    }
+}
+
+#[cfg(not(unix))]
+async fn shutdown_signal() {
+    let _ = tokio::signal::ctrl_c().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -380,12 +404,12 @@ async fn handle_mcp(
                 None,
             );
         };
-        if protocol_version.is_some_and(|revision| revision != session.protocol_version) {
+        if protocol_version != Some(session.protocol_version) {
             return mcp_http_error(
                 StatusCode::BAD_REQUEST,
                 Value::Null,
                 -32600,
-                "mcp-protocol-version does not match the negotiated session version",
+                "mcp-protocol-version is required and must match the negotiated session version",
                 Some(session_id),
             );
         }
@@ -607,7 +631,7 @@ async fn handle_mcp_delete(State(state): State<AppState>, headers: HeaderMap) ->
     let Some(session) = sessions.get(&session_id) else {
         return StatusCode::NOT_FOUND;
     };
-    if protocol_version.is_some_and(|revision| revision != session.protocol_version) {
+    if protocol_version != Some(session.protocol_version) {
         return StatusCode::BAD_REQUEST;
     }
     let Ok(working_directory) = mcp_working_directory(&headers) else {
@@ -624,7 +648,9 @@ async fn handle_mcp_delete(State(state): State<AppState>, headers: HeaderMap) ->
 }
 
 fn mcp_session_id(headers: &HeaderMap) -> Result<Option<String>, &'static str> {
-    match headers.get("mcp-session-id") {
+    let value = single_header(headers, "mcp-session-id")
+        .map_err(|_| "mcp-session-id header must appear once")?;
+    match value {
         None => Ok(None),
         Some(value) => value
             .to_str()
@@ -648,14 +674,8 @@ enum McpProtocolVersionError {
 fn mcp_protocol_version(
     headers: &HeaderMap,
 ) -> Result<Option<ProtocolRevision>, McpProtocolVersionError> {
-    let values = headers.get_all("mcp-protocol-version");
-    let mut values = values.iter();
-    let first = values.next();
-    if values.next().is_some() {
-        return Err(McpProtocolVersionError::Invalid(
-            "mcp-protocol-version must appear once",
-        ));
-    }
+    let first = single_header(headers, "mcp-protocol-version")
+        .map_err(|_| McpProtocolVersionError::Invalid("mcp-protocol-version must appear once"))?;
     match first {
         None => Ok(None),
         Some(value) => {
@@ -739,6 +759,18 @@ fn single_header<'a>(
         return Err(format!("{name} header must appear once"));
     }
     Ok(first)
+}
+
+fn validate_mcp_header_multiplicity(headers: &HeaderMap) -> Result<(), String> {
+    for name in [
+        "origin",
+        "authorization",
+        "mcp-session-id",
+        "mcp-protocol-version",
+    ] {
+        single_header(headers, name)?;
+    }
+    Ok(())
 }
 
 fn decode_mcp_name(value: &HeaderValue) -> Result<String, String> {
@@ -894,6 +926,9 @@ async fn auth_middleware(
     request: axum::extract::Request,
     next: Next,
 ) -> Response {
+    if let Err(message) = validate_mcp_header_multiplicity(&headers) {
+        return (StatusCode::BAD_REQUEST, message).into_response();
+    }
     if request.uri().path() == "/mcp"
         && headers
             .get(header::ORIGIN)
@@ -1467,6 +1502,59 @@ mod tests {
         assert!(constant_time_eq(b"", b""));
     }
 
+    #[test]
+    fn mcp_security_headers_must_be_single_valued() {
+        for name in [
+            "origin",
+            "authorization",
+            "mcp-session-id",
+            "mcp-protocol-version",
+        ] {
+            let mut headers = HeaderMap::new();
+            headers.append(name, HeaderValue::from_static("one"));
+            headers.append(name, HeaderValue::from_static("two"));
+            assert!(
+                validate_mcp_header_multiplicity(&headers).is_err(),
+                "accepted duplicate {name} header"
+            );
+        }
+    }
+
+    #[test]
+    fn cloned_http_clients_share_one_embedder_instance() {
+        struct SharedEmbedder;
+        impl Embedder for SharedEmbedder {
+            fn embed(&self, _text: &str) -> icm_core::IcmResult<Vec<f32>> {
+                Ok(vec![0.0])
+            }
+
+            fn embed_batch(&self, texts: &[&str]) -> icm_core::IcmResult<Vec<Vec<f32>>> {
+                Ok(texts.iter().map(|_| vec![0.0]).collect())
+            }
+
+            fn dimensions(&self) -> usize {
+                1
+            }
+        }
+
+        let embedder: Arc<dyn Embedder + Send + Sync> = Arc::new(SharedEmbedder);
+        let state = AppState {
+            store: Arc::new(Mutex::new(Store::in_memory().unwrap())),
+            embedder: Some(embedder),
+            mcp_sessions: Arc::new(Mutex::new(HashMap::new())),
+            mcp_compact: false,
+            auto_consolidate: AutoConsolidate::default(),
+            daemon_working_directory: std::env::current_dir().unwrap().canonicalize().unwrap(),
+            token: None,
+        };
+        let client_a = state.clone();
+        let client_b = state;
+        assert!(Arc::ptr_eq(
+            client_a.embedder.as_ref().unwrap(),
+            client_b.embedder.as_ref().unwrap(),
+        ));
+    }
+
     #[tokio::test]
     async fn mcp_http_supports_stateless_2024_and_sessioned_2025() {
         let state = AppState {
@@ -1592,6 +1680,20 @@ mod tests {
         session_headers.insert(
             "mcp-protocol-version",
             HeaderValue::from_static("2025-11-25"),
+        );
+        let mut missing_version_headers = session_headers.clone();
+        missing_version_headers.remove("mcp-protocol-version");
+        let response = handle_mcp(
+            State(state.clone()),
+            missing_version_headers.clone(),
+            Query(McpQuery::default()),
+            Bytes::from_static(br#"{"jsonrpc":"2.0","id":4,"method":"tools/list"}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(
+            handle_mcp_delete(State(state.clone()), missing_version_headers).await,
+            StatusCode::BAD_REQUEST
         );
         let mut mismatch_headers = session_headers.clone();
         mismatch_headers.insert(

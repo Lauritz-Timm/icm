@@ -22,10 +22,31 @@ struct RequestRecord {
     headers: BTreeMap<String, String>,
     authorization: Option<String>,
     body: String,
-    model_instance_id: &'static str,
+    model_instance_id: String,
     model_load_count: u64,
     peer_address: String,
     local_address: String,
+}
+
+#[derive(Debug)]
+struct MockModel {
+    instance_id: String,
+    load_count: u64,
+}
+
+#[derive(Debug, Default)]
+struct MockModelLoader {
+    load_count: u64,
+}
+
+impl MockModelLoader {
+    fn load(&mut self) -> MockModel {
+        self.load_count += 1;
+        MockModel {
+            instance_id: format!("synthetic-model-instance-{:03}", self.load_count),
+            load_count: self.load_count,
+        }
+    }
 }
 
 pub fn run(record_path: &Path, mode: &str, ipv6: bool) -> Result<()> {
@@ -40,6 +61,7 @@ pub fn run(record_path: &Path, mode: &str, ipv6: bool) -> Result<()> {
     };
     let listener = TcpListener::bind(bind).context("binding loopback mock daemon")?;
     let address = listener.local_addr()?;
+    let model = MockModelLoader::default().load();
     println!("READY http://{address}/");
     std::io::stdout().flush()?;
 
@@ -67,8 +89,8 @@ pub fn run(record_path: &Path, mode: &str, ipv6: bool) -> Result<()> {
             headers: request.headers.clone(),
             authorization: request.authorization.clone(),
             body: request.body.clone(),
-            model_instance_id: "synthetic-model-instance-001",
-            model_load_count: 1,
+            model_instance_id: model.instance_id.clone(),
+            model_load_count: model.load_count,
             peer_address: peer_address.to_string(),
             local_address: local_address.to_string(),
         };
@@ -89,7 +111,7 @@ pub fn run(record_path: &Path, mode: &str, ipv6: bool) -> Result<()> {
             )?;
             continue;
         }
-        let response = mock_mcp_response(&request.body, mode);
+        let response = mock_mcp_response(&request.body, mode, &model);
         let response_json = serde_json::to_string(&response)?;
         match mode {
             "redirect" => {
@@ -238,7 +260,7 @@ fn request_method(body: &str) -> String {
         .unwrap_or_default()
 }
 
-fn mock_mcp_response(body: &str, mode: &str) -> Value {
+fn mock_mcp_response(body: &str, mode: &str, model: &MockModel) -> Value {
     let request: Value = serde_json::from_str(body).unwrap_or(Value::Null);
     let mut id = request.get("id").cloned().unwrap_or(Value::Null);
     if mode == "id-mismatch" {
@@ -257,20 +279,20 @@ fn mock_mcp_response(body: &str, mode: &str) -> Value {
             "cacheScope": "private",
             "resultType": "complete",
             "_meta": {"io.modelcontextprotocol/serverInfo":{"name":"icm-cleanroom-mock","version":"1"}},
-            "modelInstanceId": "synthetic-model-instance-001",
-            "modelLoadCount": 1
+            "modelInstanceId": model.instance_id,
+            "modelLoadCount": model.load_count
         }),
         "ping" => json!({
             "resultType": "complete",
             "_meta": {"io.modelcontextprotocol/serverInfo":{"name":"icm-cleanroom-mock","version":"1"}},
-            "modelInstanceId": "synthetic-model-instance-001",
-            "modelLoadCount": 1
+            "modelInstanceId": model.instance_id,
+            "modelLoadCount": model.load_count
         }),
         _ => json!({
             "content": [{"type": "text", "text": "synthetic daemon response"}],
             "structuredContent": {
-                "modelInstanceId": "synthetic-model-instance-001",
-                "modelLoadCount": 1
+                "modelInstanceId": model.instance_id,
+                "modelLoadCount": model.load_count
             },
             "resultType": "complete",
             "_meta": {"io.modelcontextprotocol/serverInfo":{"name":"icm-cleanroom-mock","version":"1"}}
@@ -326,11 +348,19 @@ mod tests {
 
     #[test]
     fn mock_response_preserves_or_adversarially_changes_request_id() {
-        let normal = mock_mcp_response(r#"{"jsonrpc":"2.0","id":9,"method":"ping"}"#, "normal");
+        let model = MockModelLoader::default().load();
+        let normal = mock_mcp_response(
+            r#"{"jsonrpc":"2.0","id":9,"method":"ping"}"#,
+            "normal",
+            &model,
+        );
         assert_eq!(normal["id"], 9);
         assert_eq!(normal["result"]["modelLoadCount"], 1);
-        let mismatched =
-            mock_mcp_response(r#"{"jsonrpc":"2.0","id":9,"method":"ping"}"#, "id-mismatch");
+        let mismatched = mock_mcp_response(
+            r#"{"jsonrpc":"2.0","id":9,"method":"ping"}"#,
+            "id-mismatch",
+            &model,
+        );
         assert_ne!(mismatched["id"], 9);
     }
 }

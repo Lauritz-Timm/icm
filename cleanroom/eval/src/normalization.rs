@@ -43,14 +43,29 @@ const EXACT_RULES: &[(&str, &str, &str)] = &[
         "ulid",
     ),
     (
+        "modern.structured-transcript-start",
+        "/response/result/content/0/text",
+        "ulid-in-text",
+    ),
+    (
         "modern.structured-transcript-record",
         "/response/result/structuredContent/messageId",
         "ulid",
     ),
     (
+        "modern.structured-transcript-record",
+        "/response/result/content/0/text",
+        "ulid-in-text",
+    ),
+    (
         "modern.structured-feedback-record",
         "/response/result/structuredContent/id",
         "ulid",
+    ),
+    (
+        "modern.structured-feedback-record",
+        "/response/result/content/0/text",
+        "ulid-in-text",
     ),
     (
         "modern.structured-feedback-record",
@@ -139,6 +154,9 @@ const PREFIX_RULES: &[(&str, &str, &str)] = &[
 ];
 
 pub fn normalize_report(report: &EvaluationReport) -> Result<Vec<u8>> {
+    let mut design = report.design.clone();
+    // The design binds the baseline receipt, so its own hash cannot bind that receipt's report.
+    design.contract_hashes.remove("preregistered-design.json");
     let scenarios: Vec<_> = report
         .scenarios
         .iter()
@@ -154,7 +172,7 @@ pub fn normalize_report(report: &EvaluationReport) -> Result<Vec<u8>> {
         "reportVersion": report.report_version,
         "mode": report.mode,
         "candidateSha256": report.candidate_sha256,
-        "design": report.design,
+        "design": design,
         "scenarios": scenarios,
         "payloadSizes": report.metrics.payload_sizes,
         "retrieval": report.metrics.retrieval,

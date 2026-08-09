@@ -24,6 +24,8 @@ mod learn_tests;
 // time; the static build links onnxruntime in.
 #[cfg(feature = "embeddings-dynamic")]
 mod ort_runtime;
+mod provider_document;
+mod provider_journal;
 mod recall_format;
 mod summarizer;
 #[cfg(feature = "tui")]

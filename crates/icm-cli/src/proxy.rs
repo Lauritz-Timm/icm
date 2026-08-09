@@ -41,9 +41,34 @@ struct ProxyState {
     protocol_version: String,
     session_id: Option<String>,
     initialized: bool,
+    initialize_request: Option<Vec<u8>>,
+    initialized_notification: Option<Vec<u8>>,
     working_directory: String,
 }
 
+#[derive(Debug)]
+struct LocalInputError {
+    code: i64,
+    message: String,
+}
+
+impl LocalInputError {
+    fn parse(error: serde_json::Error) -> Self {
+        Self {
+            code: -32700,
+            message: format!("parse error: {error}"),
+        }
+    }
+
+    fn invalid(message: impl Into<String>) -> Self {
+        Self {
+            code: -32600,
+            message: message.into(),
+        }
+    }
+}
+
+#[derive(Debug)]
 struct MessageMeta {
     id: Option<Value>,
     method: String,
@@ -65,6 +90,8 @@ pub fn run(args: &ProxyArgs) -> Result<()> {
         protocol_version: DEFAULT_PROTOCOL_VERSION.to_owned(),
         session_id: None,
         initialized: false,
+        initialize_request: None,
+        initialized_notification: None,
         working_directory: proxy_working_directory()?,
     };
     let stdin = io::stdin();
@@ -79,6 +106,7 @@ pub fn run(args: &ProxyArgs) -> Result<()> {
                 write_error(
                     &mut writer,
                     Value::Null,
+                    -32600,
                     &format!("proxy request exceeds {MAX_REQUEST_BYTES} bytes"),
                 )?;
                 continue;
@@ -96,7 +124,7 @@ pub fn run(args: &ProxyArgs) -> Result<()> {
             let meta = match message_meta(&buffer, &state) {
                 Ok(meta) => meta,
                 Err(error) => {
-                    write_error(&mut writer, Value::Null, &error)?;
+                    write_error(&mut writer, Value::Null, error.code, &error.message)?;
                     continue;
                 }
             };
@@ -114,9 +142,12 @@ pub fn run(args: &ProxyArgs) -> Result<()> {
                 Err(error) if meta.is_notification() => {
                     eprintln!("[icm proxy] notification failed: {error}");
                 }
-                Err(error) => {
-                    write_error(&mut writer, meta.id.clone().unwrap_or(Value::Null), &error)?
-                }
+                Err(error) => write_error(
+                    &mut writer,
+                    meta.id.clone().unwrap_or(Value::Null),
+                    -32000,
+                    &error,
+                )?,
             }
         }
         Ok(())
@@ -233,20 +264,23 @@ fn resolve_token(path: Option<&Path>) -> Result<Option<String>> {
     Ok(Some(token))
 }
 
-fn message_meta(raw: &[u8], state: &ProxyState) -> Result<MessageMeta, String> {
-    let value: Value =
-        serde_json::from_slice(raw).map_err(|error| format!("parse error: {error}"))?;
+fn message_meta(raw: &[u8], state: &ProxyState) -> Result<MessageMeta, LocalInputError> {
+    let value: Value = serde_json::from_slice(raw).map_err(LocalInputError::parse)?;
     let object = value
         .as_object()
-        .ok_or_else(|| "invalid JSON-RPC request: expected an object".to_owned())?;
+        .ok_or_else(|| LocalInputError::invalid("invalid JSON-RPC request: expected an object"))?;
     if object.get("jsonrpc").and_then(Value::as_str) != Some("2.0") {
-        return Err("invalid JSON-RPC request: expected version 2.0".into());
+        return Err(LocalInputError::invalid(
+            "invalid JSON-RPC request: expected version 2.0",
+        ));
     }
     let method = object
         .get("method")
         .and_then(Value::as_str)
         .filter(|method| !method.is_empty())
-        .ok_or_else(|| "invalid JSON-RPC request: method must be a non-empty string".to_owned())?
+        .ok_or_else(|| {
+            LocalInputError::invalid("invalid JSON-RPC request: method must be a non-empty string")
+        })?
         .to_owned();
     let name = match method.as_str() {
         "tools/call" | "prompts/get" => value.pointer("/params/name"),
@@ -274,11 +308,15 @@ fn message_meta(raw: &[u8], state: &ProxyState) -> Result<MessageMeta, String> {
                 .bytes()
                 .all(|byte| byte == b'\t' || (0x20..=0x7e).contains(&byte))
         {
-            return Err(format!("invalid {name} for HTTP forwarding"));
+            return Err(LocalInputError::invalid(format!(
+                "invalid {name} for HTTP forwarding"
+            )));
         }
     }
     if name.as_ref().is_some_and(|value| value.len() > 4_096) {
-        return Err("invalid MCP name for HTTP forwarding".into());
+        return Err(LocalInputError::invalid(
+            "invalid MCP name for HTTP forwarding",
+        ));
     }
     Ok(MessageMeta {
         id: object.get("id").cloned(),
@@ -309,6 +347,133 @@ fn forward(
     meta: &MessageMeta,
     raw: &[u8],
 ) -> Result<Option<Vec<u8>>, String> {
+    match forward_once(agent, endpoint, token, state, meta, raw) {
+        Err(error) if error == SESSION_NOT_FOUND => {
+            recover_session(
+                agent,
+                endpoint,
+                token,
+                state,
+                meta.method != "notifications/initialized",
+            )?;
+            let retry_meta = message_meta(raw, state).map_err(|error| {
+                format!("stored proxy request became invalid: {}", error.message)
+            })?;
+            forward_once(agent, endpoint, token, state, &retry_meta, raw)
+        }
+        result => result,
+    }
+}
+
+fn recover_session(
+    agent: &ureq::Agent,
+    endpoint: &str,
+    token: Option<&str>,
+    state: &mut ProxyState,
+    replay_initialized_notification: bool,
+) -> Result<(), String> {
+    let initialize_request = state
+        .initialize_request
+        .clone()
+        .ok_or_else(|| SESSION_NOT_FOUND.to_owned())?;
+    let initialized_notification = replay_initialized_notification
+        .then(|| state.initialized_notification.clone())
+        .flatten();
+    reset_session_state(state);
+    let initialize_meta = message_meta(&initialize_request, state)
+        .map_err(|error| format!("stored initialize request is invalid: {}", error.message))?;
+    // The initialize response establishes proxy state but is never forwarded
+    // to stdio. The single direct retry below prevents a stale session loop.
+    forward_once(
+        agent,
+        endpoint,
+        token,
+        state,
+        &initialize_meta,
+        &initialize_request,
+    )?;
+    if !state.initialized {
+        return Err("upstream initialize response did not establish a session".into());
+    }
+    if let Some(notification) = initialized_notification {
+        let notification_meta = message_meta(&notification, state).map_err(|error| {
+            format!(
+                "stored initialized notification is invalid: {}",
+                error.message
+            )
+        })?;
+        forward_once(
+            agent,
+            endpoint,
+            token,
+            state,
+            &notification_meta,
+            &notification,
+        )?;
+    }
+    Ok(())
+}
+
+fn reset_session_state(state: &mut ProxyState) {
+    state.protocol_version = DEFAULT_PROTOCOL_VERSION.to_owned();
+    state.session_id = None;
+    state.initialized = false;
+    state.initialize_request = None;
+    state.initialized_notification = None;
+}
+
+fn apply_initialize_response(
+    state: &mut ProxyState,
+    raw: &[u8],
+    response_value: &Value,
+    response_session: Option<String>,
+) -> Result<(), String> {
+    if response_value.get("error").is_some() {
+        return Ok(());
+    }
+    let Some(version) = response_value
+        .pointer("/result/protocolVersion")
+        .and_then(Value::as_str)
+    else {
+        return Ok(());
+    };
+    let session_id = if matches!(version, "2025-06-18" | "2025-11-25") {
+        match response_session {
+            Some(session)
+                if !session.is_empty()
+                    && session.len() <= 128
+                    && session.bytes().all(|byte| (0x21..=0x7e).contains(&byte)) =>
+            {
+                Some(session)
+            }
+            Some(_) => {
+                reset_session_state(state);
+                return Err("upstream returned an invalid MCP session ID".into());
+            }
+            None => {
+                reset_session_state(state);
+                return Err("upstream omitted required MCP session ID".into());
+            }
+        }
+    } else {
+        None
+    };
+    state.protocol_version = version.to_owned();
+    state.session_id = session_id;
+    state.initialized = true;
+    state.initialize_request = Some(raw.to_vec());
+    state.initialized_notification = None;
+    Ok(())
+}
+
+fn forward_once(
+    agent: &ureq::Agent,
+    endpoint: &str,
+    token: Option<&str>,
+    state: &mut ProxyState,
+    meta: &MessageMeta,
+    raw: &[u8],
+) -> Result<Option<Vec<u8>>, String> {
     let mut request = agent
         .post(endpoint)
         .set("Content-Type", "application/json")
@@ -327,11 +492,16 @@ fn forward(
     if let Some(version) = protocol_version_header(meta) {
         request = request.set("Mcp-Protocol-Version", version);
     }
-    if matches!(meta.protocol_version.as_str(), "2025-06-18" | "2025-11-25") {
+    let sent_session_id = if matches!(meta.protocol_version.as_str(), "2025-06-18" | "2025-11-25") {
         if let Some(session_id) = state.session_id.as_deref() {
             request = request.set("Mcp-Session-Id", session_id);
+            Some(session_id)
+        } else {
+            None
         }
-    }
+    } else {
+        None
+    };
     if let Some(token) = token {
         request = request.set("Authorization", &format!("Bearer {token}"));
     }
@@ -342,6 +512,9 @@ fn forward(
         Err(ureq::Error::Transport(_)) => return Err("upstream request failed".into()),
     };
     let status = response.status();
+    if status == 404 && sent_session_id.is_some() {
+        return Err(SESSION_NOT_FOUND.into());
+    }
     let response_type = response.content_type().trim().to_owned();
     let content_length = response
         .header("Content-Length")
@@ -364,15 +537,12 @@ fn forward(
         return Err("upstream response was truncated".into());
     }
     if meta.is_notification() && status == 202 && body.is_empty() {
+        if meta.method == "notifications/initialized" {
+            state.initialized_notification = Some(raw.to_vec());
+        }
         return Ok(None);
     }
     let (body, response_value) = decode_response_body(body, &response_type, meta, status)?;
-    let error_code = response_value
-        .pointer("/error/code")
-        .and_then(Value::as_i64);
-    if status == 404 && state.session_id.is_some() && error_code == Some(-32001) {
-        return Err(SESSION_NOT_FOUND.into());
-    }
     if !(200..300).contains(&status) {
         if response_value.get("jsonrpc").and_then(Value::as_str) != Some("2.0")
             || !response_value.get("error").is_some_and(Value::is_object)
@@ -388,29 +558,11 @@ fn forward(
         };
     }
 
-    if meta.method == "initialize" && response_value.get("error").is_none() {
-        if let Some(version) = response_value
-            .pointer("/result/protocolVersion")
-            .and_then(Value::as_str)
-        {
-            state.protocol_version = version.to_owned();
-            state.initialized = true;
-            state.session_id = if matches!(version, "2025-06-18" | "2025-11-25") {
-                match response_session {
-                    Some(session)
-                        if !session.is_empty()
-                            && session.len() <= 128
-                            && session.bytes().all(|byte| (0x21..=0x7e).contains(&byte)) =>
-                    {
-                        Some(session)
-                    }
-                    Some(_) => return Err("upstream returned an invalid MCP session ID".into()),
-                    None => return Err("upstream omitted required MCP session ID".into()),
-                }
-            } else {
-                None
-            };
-        }
+    if meta.method == "notifications/initialized" && meta.is_notification() {
+        state.initialized_notification = Some(raw.to_vec());
+    }
+    if meta.method == "initialize" {
+        apply_initialize_response(state, raw, &response_value, response_session)?;
     }
     Ok((!meta.is_notification()).then_some(body))
 }
@@ -522,10 +674,10 @@ fn cleanup_session(
     }
 }
 
-fn write_error(writer: &mut impl Write, id: Value, message: &str) -> Result<()> {
+fn write_error(writer: &mut impl Write, id: Value, code: i64, message: &str) -> Result<()> {
     serde_json::to_writer(
         &mut *writer,
-        &JsonRpcResponse::err(id, -32000, message.to_owned()),
+        &JsonRpcResponse::err(id, code, message.to_owned()),
     )?;
     writer.write_all(b"\n")?;
     writer.flush()?;
@@ -597,6 +749,8 @@ mod tests {
             protocol_version: DEFAULT_PROTOCOL_VERSION.into(),
             session_id: None,
             initialized: false,
+            initialize_request: None,
+            initialized_notification: None,
             working_directory: "/tmp/client project".into(),
         };
         let meta = message_meta(modern, &state).unwrap();
@@ -630,6 +784,8 @@ mod tests {
             protocol_version: DEFAULT_PROTOCOL_VERSION.into(),
             session_id: None,
             initialized: false,
+            initialize_request: None,
+            initialized_notification: None,
             working_directory: "/tmp/client project".into(),
         };
         let initialize = br#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2099-01-01"}}"#;
@@ -640,6 +796,8 @@ mod tests {
             protocol_version: "2025-11-25".into(),
             session_id: Some("session".into()),
             initialized: true,
+            initialize_request: None,
+            initialized_notification: None,
             working_directory: "/tmp/client project".into(),
         };
         let listed = br#"{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}"#;
@@ -705,6 +863,62 @@ data: "result":{"ok":true}}
             decode_response_body(wrong_id.to_vec(), "application/json", &meta, 400).unwrap_err(),
             "upstream response ID does not match request ID"
         );
+    }
+
+    #[test]
+    fn local_input_errors_keep_standard_json_rpc_codes() {
+        let state = ProxyState {
+            protocol_version: DEFAULT_PROTOCOL_VERSION.into(),
+            session_id: None,
+            initialized: false,
+            initialize_request: None,
+            initialized_notification: None,
+            working_directory: "/tmp/client project".into(),
+        };
+        for (raw, expected_code) in [
+            (
+                br#"{"jsonrpc":"2.0","id":1,"method":"ping""# as &[u8],
+                -32700,
+            ),
+            (br#"{"jsonrpc":"2.0","id":1}"#, -32600),
+        ] {
+            let error = message_meta(raw, &state).expect_err("invalid local input");
+            assert_eq!(error.code, expected_code);
+            let mut output = Vec::new();
+            write_error(&mut output, Value::Null, error.code, &error.message).unwrap();
+            let response: Value = serde_json::from_slice(&output).unwrap();
+            assert_eq!(response["error"]["code"], expected_code);
+        }
+    }
+
+    #[test]
+    fn invalid_initialize_session_resets_proxy_state() {
+        let raw = br#"{"jsonrpc":"2.0","id":1,"method":"initialize"}"#;
+        let response = json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {"protocolVersion": "2025-11-25"}
+        });
+        for response_session in [None, Some("bad\nsession".to_owned())] {
+            let mut state = ProxyState {
+                protocol_version: "2025-06-18".into(),
+                session_id: Some("old".into()),
+                initialized: true,
+                initialize_request: Some(raw.to_vec()),
+                initialized_notification: Some(
+                    br#"{"jsonrpc":"2.0","method":"notifications/initialized"}"#.to_vec(),
+                ),
+                working_directory: "/tmp/client project".into(),
+            };
+            assert!(
+                apply_initialize_response(&mut state, raw, &response, response_session,).is_err()
+            );
+            assert_eq!(state.protocol_version, DEFAULT_PROTOCOL_VERSION);
+            assert!(!state.initialized);
+            assert!(state.session_id.is_none());
+            assert!(state.initialize_request.is_none());
+            assert!(state.initialized_notification.is_none());
+        }
     }
 
     #[test]

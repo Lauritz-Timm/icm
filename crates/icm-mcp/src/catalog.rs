@@ -21,6 +21,7 @@ use crate::tools::AutoConsolidate;
 pub type ToolHandler = for<'a> fn(&ToolContext<'a>, &Value) -> ToolResult;
 type InputValidator = fn(&Value) -> Result<(), String>;
 type InputNormalizer = fn(&Value) -> Value;
+type OutputValidator = fn(&Value, &Value) -> Result<(), String>;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EmbedderRequirement {
@@ -148,6 +149,7 @@ pub struct ToolSpec {
     modern_input_schema: Value,
     modern_output_schema: Option<Value>,
     modern_output_type: Option<TypeId>,
+    validate_output: Option<OutputValidator>,
     legacy_input_normalizer: Option<InputNormalizer>,
     annotations: ToolAnnotations,
     requirements: ToolRequirements,
@@ -177,6 +179,7 @@ impl ToolSpec {
             modern_input_schema,
             modern_output_schema: None,
             modern_output_type: None,
+            validate_output: None,
             legacy_input_normalizer,
             annotations,
             requirements,
@@ -187,12 +190,12 @@ impl ToolSpec {
 
     pub(crate) fn with_output<O>(mut self) -> Self
     where
-        O: JsonSchema + 'static,
+        O: DeserializeOwned + JsonSchema + 'static,
     {
         self.modern_output_schema = Some(generated_output_schema::<O>());
-        self.requirements.structured_output_from_revision =
-            Some(ProtocolRevision::V2025_06_18);
+        self.requirements.structured_output_from_revision = Some(ProtocolRevision::V2025_06_18);
         self.modern_output_type = Some(TypeId::of::<O>());
+        self.validate_output = Some(validate_output::<O>);
         self
     }
 
@@ -251,6 +254,15 @@ where
     serde_json::from_value::<I>(arguments.clone())
         .map(|_| ())
         .map_err(|error| bounded_error(error.to_string()))
+}
+
+fn validate_output<O>(output: &Value, schema: &Value) -> Result<(), String>
+where
+    O: DeserializeOwned,
+{
+    serde_json::from_value::<O>(output.clone())
+        .map_err(|error| bounded_error(error.to_string()))?;
+    validate_schema_constraints(output, schema, "$", 0)
 }
 
 fn generated_input_schema<I>(legacy: &Value) -> Value
@@ -367,8 +379,27 @@ fn validate_schema_constraints(
     path: &str,
     depth: usize,
 ) -> Result<(), String> {
+    validate_schema_constraints_at(value, schema, schema, path, depth)
+}
+
+fn validate_schema_constraints_at(
+    value: &Value,
+    schema: &Value,
+    root_schema: &Value,
+    path: &str,
+    depth: usize,
+) -> Result<(), String> {
     if depth > 32 {
         return Err("input nesting exceeds maximum depth".into());
+    }
+    if let Some(reference) = schema.get("$ref").and_then(Value::as_str) {
+        let Some(referenced) = reference
+            .strip_prefix('#')
+            .and_then(|pointer| root_schema.pointer(pointer))
+        else {
+            return Err(format!("{path} contains an unresolved schema reference"));
+        };
+        return validate_schema_constraints_at(value, referenced, root_schema, path, depth + 1);
     }
     if let Some(minimum) = schema.get("minimum").and_then(Value::as_i64) {
         if value.as_i64().is_some_and(|actual| actual < minimum) {
@@ -418,9 +449,10 @@ fn validate_schema_constraints(
     ) {
         for (name, child) in object {
             if let Some(child_schema) = properties.get(name) {
-                validate_schema_constraints(
+                validate_schema_constraints_at(
                     child,
                     child_schema,
+                    root_schema,
                     &format!("{path}.{name}"),
                     depth + 1,
                 )?;
@@ -429,7 +461,13 @@ fn validate_schema_constraints(
     }
     if let (Some(items), Some(array)) = (schema.get("items"), value.as_array()) {
         for (index, child) in array.iter().enumerate() {
-            validate_schema_constraints(child, items, &format!("{path}[{index}]"), depth + 1)?;
+            validate_schema_constraints_at(
+                child,
+                items,
+                root_schema,
+                &format!("{path}[{index}]"),
+                depth + 1,
+            )?;
         }
     }
     Ok(())
@@ -547,14 +585,21 @@ impl ToolCatalog {
             }
         }
         let result = (registration.handler)(context, dispatch_arguments);
-        if validation == InputValidation::Modern
-            && !result.is_error
-            && result.structured_content_type() != registration.modern_output_type
-        {
-            return DispatchResult::ToolResult(ToolResult::error(format!(
-                "tool {} emitted output that does not match its advertised schema",
-                registration.name
-            )));
+        if validation == InputValidation::Modern && !result.is_error {
+            let type_matches = result.structured_content_type() == registration.modern_output_type;
+            let value_matches = registration.validate_output.is_none_or(|validate_output| {
+                result
+                    .structured_content
+                    .as_deref()
+                    .zip(registration.modern_output_schema.as_ref())
+                    .is_some_and(|(output, schema)| validate_output(output, schema).is_ok())
+            });
+            if !type_matches || !value_matches {
+                return DispatchResult::ToolResult(ToolResult::error(format!(
+                    "tool {} emitted output that does not match its advertised schema",
+                    registration.name
+                )));
+            }
         }
         DispatchResult::ToolResult(result)
     }
@@ -848,6 +893,92 @@ mod tests {
                 );
                 assert!(!contains_key(schema, "embedding"));
             }
+        }
+    }
+
+    #[derive(schemars::JsonSchema, serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct OutputProbe {
+        nested: OutputProbeNested,
+    }
+
+    #[derive(schemars::JsonSchema, serde::Deserialize, serde::Serialize)]
+    #[serde(deny_unknown_fields)]
+    struct OutputProbeNested {
+        #[schemars(length(min = 1))]
+        value: String,
+    }
+
+    fn output_probe(name: &'static str, handler: ToolHandler) -> ToolSpec {
+        ToolSpec::typed::<crate::inputs::MemoryStatsInput>(
+            name,
+            "test-only emitted output probe",
+            json!({"type": "object", "properties": {}}),
+            None,
+            ToolAnnotations::new(true, false, true, false),
+            ToolRequirements::STORE,
+            handler,
+        )
+        .with_output::<OutputProbe>()
+    }
+
+    fn valid_output_probe(_: &ToolContext<'_>, _: &Value) -> ToolResult {
+        ToolResult::structured(
+            "legacy".into(),
+            "modern".into(),
+            &OutputProbe {
+                nested: OutputProbeNested {
+                    value: "valid".into(),
+                },
+            },
+        )
+    }
+
+    fn malformed_output_probe(context: &ToolContext<'_>, arguments: &Value) -> ToolResult {
+        let mut result = valid_output_probe(context, arguments);
+        result.structured_content.as_mut().unwrap()["nested"]["value"] = json!("");
+        result
+    }
+
+    fn missing_output_probe(context: &ToolContext<'_>, arguments: &Value) -> ToolResult {
+        let mut result = valid_output_probe(context, arguments);
+        result.structured_content = None;
+        result
+    }
+
+    #[test]
+    fn dispatch_validates_the_actual_emitted_output_value() {
+        let catalog = ToolCatalog::new(
+            vec![
+                output_probe("valid_output", valid_output_probe),
+                output_probe("malformed_output", malformed_output_probe),
+                output_probe("missing_output", missing_output_probe),
+            ],
+            false,
+        )
+        .unwrap();
+        let store = Store::in_memory().unwrap();
+        let working_directory = std::env::current_dir().unwrap();
+        let context = ToolContext {
+            store: &store,
+            embedder: None,
+            compact: false,
+            auto_consolidate: AutoConsolidate::default(),
+            working_directory: &working_directory,
+            enforce_directory_boundary: true,
+        };
+
+        for (name, is_error) in [
+            ("valid_output", false),
+            ("malformed_output", true),
+            ("missing_output", true),
+        ] {
+            let DispatchResult::ToolResult(result) =
+                catalog.dispatch(&context, name, &json!({}), InputValidation::Modern)
+            else {
+                panic!("probe should reach its handler");
+            };
+            assert_eq!(result.is_error, is_error);
         }
     }
 

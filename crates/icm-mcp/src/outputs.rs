@@ -5,16 +5,16 @@ use std::collections::HashSet;
 use chrono::{DateTime, Utc};
 use icm_core::{Importance, Memory, MemorySource, Scope, StoreStats};
 use schemars::JsonSchema;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 const MAX_RECALL_RAW_EXCERPT_BYTES: usize = 2_048;
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[schemars(inline)]
 #[serde(transparent)]
 struct Nullable<T>(Option<T>);
 
-#[derive(Clone, Copy, Debug, JsonSchema, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, Serialize)]
 #[schemars(inline)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum SearchMode {
@@ -23,7 +23,7 @@ pub(crate) enum SearchMode {
     Keyword,
 }
 
-#[derive(Clone, Copy, Debug, JsonSchema, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, Serialize)]
 #[schemars(inline)]
 #[serde(rename_all = "lowercase")]
 enum ImportanceOutput {
@@ -44,7 +44,7 @@ impl From<Importance> for ImportanceOutput {
     }
 }
 
-#[derive(Clone, Copy, Debug, JsonSchema, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, Serialize)]
 #[schemars(inline)]
 #[serde(rename_all = "lowercase")]
 enum ScopeOutput {
@@ -63,7 +63,7 @@ impl From<Scope> for ScopeOutput {
     }
 }
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[schemars(inline)]
 #[serde(
     tag = "type",
@@ -100,7 +100,7 @@ impl From<&MemorySource> for MemorySourceOutput {
     }
 }
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[schemars(rename = "memory")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct MemoryOutput {
@@ -174,7 +174,7 @@ pub(crate) fn truncate_recall_raw(raw: &str) -> (&str, bool) {
     (&raw[..end], true)
 }
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct MemoryRecallOutput {
     query: String,
@@ -217,7 +217,7 @@ impl MemoryRecallOutput {
     }
 }
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[schemars(inline)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TopicCountOutput {
@@ -225,7 +225,7 @@ struct TopicCountOutput {
     count: usize,
 }
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct MemoryTopicsOutput {
     topics: Vec<TopicCountOutput>,
@@ -253,7 +253,7 @@ impl MemoryTopicsOutput {
     }
 }
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct MemoryStatsOutput {
     total_memories: usize,
@@ -312,7 +312,7 @@ mod tests {
 
 use icm_core::{Feedback, FeedbackStats, Message, Role, Session, TranscriptHit, TranscriptStats};
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct TranscriptStartOutput {
     #[schemars(length(min = 1))]
@@ -325,7 +325,7 @@ impl TranscriptStartOutput {
     }
 }
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct TranscriptRecordOutput {
     #[schemars(length(min = 1))]
@@ -338,7 +338,7 @@ impl TranscriptRecordOutput {
     }
 }
 
-#[derive(Clone, Copy, Debug, JsonSchema, Serialize)]
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, Serialize)]
 #[schemars(inline)]
 #[serde(rename_all = "lowercase")]
 enum TranscriptRoleOutput {
@@ -359,7 +359,7 @@ impl From<Role> for TranscriptRoleOutput {
     }
 }
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[schemars(rename = "message")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TranscriptMessageOutput {
@@ -388,7 +388,7 @@ impl From<&Message> for TranscriptMessageOutput {
     }
 }
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[schemars(rename = "session")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TranscriptSessionOutput {
@@ -413,7 +413,7 @@ impl From<&Session> for TranscriptSessionOutput {
     }
 }
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[schemars(inline)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct TranscriptHitOutput {
@@ -432,7 +432,7 @@ impl From<&TranscriptHit> for TranscriptHitOutput {
     }
 }
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct TranscriptSearchOutput {
     hits: Vec<TranscriptHitOutput>,
@@ -450,7 +450,7 @@ impl TranscriptSearchOutput {
     }
 }
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct TranscriptShowOutput {
     session: TranscriptSessionOutput,
@@ -470,7 +470,7 @@ impl TranscriptShowOutput {
     }
 }
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[schemars(inline)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RoleCountOutput {
@@ -478,7 +478,7 @@ struct RoleCountOutput {
     count: usize,
 }
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[schemars(inline)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AgentCountOutput {
@@ -486,7 +486,7 @@ struct AgentCountOutput {
     count: usize,
 }
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[schemars(inline)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SessionCountOutput {
@@ -494,7 +494,7 @@ struct SessionCountOutput {
     message_count: usize,
 }
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct TranscriptStatsOutput {
     total_sessions: usize,
@@ -537,7 +537,7 @@ impl From<TranscriptStats> for TranscriptStatsOutput {
     }
 }
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[schemars(rename = "feedback")]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct FeedbackOutput {
@@ -568,7 +568,7 @@ impl From<&Feedback> for FeedbackOutput {
     }
 }
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct FeedbackSearchOutput {
     feedback: Vec<FeedbackOutput>,
@@ -586,7 +586,7 @@ impl FeedbackSearchOutput {
     }
 }
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[schemars(inline)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct AppliedCountOutput {
@@ -594,7 +594,7 @@ struct AppliedCountOutput {
     count: u32,
 }
 
-#[derive(Debug, JsonSchema, Serialize)]
+#[derive(Debug, Deserialize, JsonSchema, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct FeedbackStatsOutput {
     total: usize,

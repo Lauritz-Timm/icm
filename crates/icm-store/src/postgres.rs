@@ -827,6 +827,26 @@ impl PostgresStore {
         Ok(map)
     }
 
+    /// Fetch a bounded, deterministic merge of exact topics in one query.
+    pub fn get_by_topics_limited(&self, topics: &[&str], limit: usize) -> IcmResult<Vec<Memory>> {
+        if topics.is_empty() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let topics: Vec<String> = topics.iter().map(|topic| (*topic).to_owned()).collect();
+        let limit = i64::try_from(limit).unwrap_or(i64::MAX);
+        let mut connection = self.conn()?;
+        let rows = connection
+            .query(
+                &format!(
+                    "SELECT {SELECT_COLS} FROM memories WHERE topic = ANY($1) \
+                     ORDER BY weight DESC, id COLLATE \"C\" ASC LIMIT $2"
+                ),
+                &[&topics, &limit],
+            )
+            .map_err(pg_err)?;
+        Ok(rows.iter().map(row_to_memory).collect())
+    }
+
     /// Expand a scored result set with one hop of related memories.
     /// Backend-agnostic logic mirrored from the SQLite store.
     pub fn expand_with_neighbors(

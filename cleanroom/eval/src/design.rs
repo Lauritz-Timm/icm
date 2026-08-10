@@ -64,7 +64,7 @@ pub const ACCEPTANCE_THRESHOLD_KEYS: &[&str] = &[
 ];
 
 const BASELINE_SOURCE_COMMIT: &str = "e2acd39fd9b77619b6ed9f0ee47828c04f9dfb40";
-const BASELINE_EVALUATOR_COMMIT: &str = "20c18d481632df9aa87a79c0d218d96ced03dc25";
+const BASELINE_EVALUATOR_COMMIT: &str = "4571bf9f4b0c4e4ac3aea5710b7dbdce07bec49c";
 const BASELINE_ROOTS: [&str; 2] = ["<ROOT_WITH_SPACES>", "<ROOT_WITH_UNICODE>"];
 
 #[derive(Debug, Clone, Deserialize)]

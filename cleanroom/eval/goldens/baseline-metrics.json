@@ -1,0 +1,29 @@
+{
+  "receipt": {
+    "receiptVersion": 1,
+    "mode": "record-baseline",
+    "sourceCommit": "e2acd39fd9b77619b6ed9f0ee47828c04f9dfb40",
+    "candidateSha256": "cf3dc8e34d235895f585cf02b68c02e37ec6f2de684c9c2935189dd0b5bf8725",
+    "evaluatorCommit": "4571bf9f4b0c4e4ac3aea5710b7dbdce07bec49c",
+    "designVersion": 12,
+    "scenarioCount": 294,
+    "statusCounts": {"FAIL": 21, "PASS": 62, "UNSUPPORTED_BASELINE": 211},
+    "legacyGoldenSha256": "e038a27846e397da43101a2776723c294c8ec19c626b938bdb8e7f7efeddbb9f",
+    "normalizedReportSha256": "9b094e9f3548052b99fba3b09a02cf7071a0e46ead9b508fa698822f232fee01",
+    "rawExchanges": [
+      {"root": "<ROOT_WITH_SPACES>", "sha256": "feb6ed225a563008edd8d832d84c3deb39e82aa94cb41c4016e69c1286822d7d", "bytes": 12961889, "lines": 293},
+      {"root": "<ROOT_WITH_UNICODE>", "sha256": "68e1525a3117cf3701b8bb3cfbc711e9c4d983b124df451016a38cbdb9e9dc8d", "bytes": 12961954, "lines": 293}
+    ]
+  },
+  "latencyMicros": {
+    "tools/list": {"median": 1067, "p95": 1177},
+    "memory/recall": {"median": 1623, "p95": 2319},
+    "memory/stats": {"median": 114, "p95": 155}
+  },
+  "payloadWireBytes": {
+    "tools/list": 13922,
+    "memory/recall": 166,
+    "memory/stats": 170
+  },
+  "retrieval": {"hitAt3": 1.0, "recallAt3": 1.0, "ndcgAt3": 1.0}
+}

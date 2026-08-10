@@ -1,0 +1,11 @@
+{
+  "k": 3,
+  "queries": [
+    {"query": "SQLite WAL", "relevant": ["01J00000000000000000000001"]},
+    {"query": "MCP schemas", "relevant": ["01J00000000000000000000002", "01J0000000000000000000000B"]},
+    {"query": "proxy daemon", "relevant": ["01J00000000000000000000004", "01J0000000000000000000000A"]},
+    {"query": "transcript chronological", "relevant": ["01J00000000000000000000005"]},
+    {"query": "feedback lexical", "relevant": ["01J00000000000000000000006"]},
+    {"query": "concise evidence", "relevant": ["01J00000000000000000000007"]}
+  ]
+}

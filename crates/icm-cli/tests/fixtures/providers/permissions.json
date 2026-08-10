@@ -1,0 +1,7 @@
+{
+  "sentinel": "unchanged",
+  "permissions": {
+    "deny": ["Bash(rm:*)"],
+    "ask": ["WebFetch(*)"]
+  }
+}

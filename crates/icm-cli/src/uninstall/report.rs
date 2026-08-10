@@ -2,16 +2,22 @@
 //! `--audit`) and the post-mutation summary.
 
 use super::discover::{HitDetail, RemovalPlan};
+use crate::provider::OwnedProviderPath;
 
 /// Print the audit / dry-run preview. Groups hits by file so users see
 /// each path once with all the things uninstall would touch under it.
 /// `purge_data` toggles the wording for [`HitDetail::DataDir`] so the
 /// preview matches what the run is actually about to do.
-pub(crate) fn print_audit(plan: &RemovalPlan, header: &str, purge_data: bool) {
+pub(crate) fn print_audit(
+    plan: &RemovalPlan,
+    header: &str,
+    purge_data: bool,
+    provider_paths: &[OwnedProviderPath],
+) {
     println!("{header}");
     println!("{}", "=".repeat(header.len()));
 
-    if plan.hits.is_empty() && plan.scan_dir_hits.is_empty() {
+    if plan.hits.is_empty() && plan.scan_dir_hits.is_empty() && provider_paths.is_empty() {
         println!("No known ICM residue found.");
         return;
     }
@@ -24,6 +30,18 @@ pub(crate) fn print_audit(plan: &RemovalPlan, header: &str, purge_data: bool) {
             purge_data,
         );
     }
+    if !provider_paths.is_empty() {
+        println!();
+        println!("Provider-owned MCP values");
+        println!("-------------------------");
+        for owned in provider_paths {
+            println!(
+                "  {} ({} value(s))",
+                owned.path.display(),
+                owned.entries_owned
+            );
+        }
+    }
 
     if !plan.processes.is_empty() {
         println!();
@@ -34,7 +52,14 @@ pub(crate) fn print_audit(plan: &RemovalPlan, header: &str, purge_data: bool) {
     }
 
     println!();
-    println!("Total: {} item(s).", plan.total_hits());
+    println!(
+        "Total: {} item(s).",
+        plan.total_hits()
+            + provider_paths
+                .iter()
+                .map(|owned| owned.entries_owned)
+                .sum::<usize>()
+    );
 }
 
 fn print_section(title: &str, hits: &[super::discover::LocationHit], purge_data: bool) {
@@ -100,12 +125,15 @@ fn print_section(title: &str, hits: &[super::discover::LocationHit], purge_data:
 }
 
 /// Brief output for `--check`. Returns the exit code.
-pub(crate) fn print_check(plan: &RemovalPlan) -> i32 {
-    if plan.is_empty() {
+pub(crate) fn print_check(plan: &RemovalPlan, provider_count: usize) -> i32 {
+    if plan.is_empty() && provider_count == 0 {
         println!("OK: no known ICM residue found");
         super::exit_codes::CLEAN
     } else {
-        println!("FOUND: {} known ICM residue item(s)", plan.total_hits());
+        println!(
+            "FOUND: {} known ICM residue item(s)",
+            plan.total_hits() + provider_count
+        );
         super::exit_codes::CHECK_RESIDUE
     }
 }

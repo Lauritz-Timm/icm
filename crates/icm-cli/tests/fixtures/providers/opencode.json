@@ -1,0 +1,6 @@
+{
+  "sentinel": "unchanged",
+  "permissions": [
+    {"action": "dangerous_*", "resource": "*", "effect": "deny"}
+  ]
+}

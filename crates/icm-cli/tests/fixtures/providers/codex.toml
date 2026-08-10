@@ -1,0 +1,5 @@
+[sentinel]
+keep = "unchanged"
+
+[mcp_servers.external.tools.external_tool]
+approval_mode = "deny"

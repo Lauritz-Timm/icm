@@ -1,5 +1,58 @@
+use std::any::TypeId;
+
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
+
+pub const SUPPORTED_PROTOCOL_VERSIONS: [&str; 4] = [
+    ProtocolRevision::V2026_07_28.as_str(),
+    ProtocolRevision::V2025_11_25.as_str(),
+    ProtocolRevision::V2025_06_18.as_str(),
+    ProtocolRevision::V2024_11_05.as_str(),
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProtocolEra {
+    InitializationBased,
+    PerRequest,
+}
+
+impl ProtocolEra {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InitializationBased => "initialization-based",
+            Self::PerRequest => "per-request",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProtocolRevision {
+    V2024_11_05,
+    V2025_06_18,
+    V2025_11_25,
+    V2026_07_28,
+}
+
+impl ProtocolRevision {
+    pub const fn parse_exact(value: &str) -> Option<Self> {
+        match value.as_bytes() {
+            b"2024-11-05" => Some(Self::V2024_11_05),
+            b"2025-06-18" => Some(Self::V2025_06_18),
+            b"2025-11-25" => Some(Self::V2025_11_25),
+            b"2026-07-28" => Some(Self::V2026_07_28),
+            _ => None,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::V2024_11_05 => "2024-11-05",
+            Self::V2025_06_18 => "2025-06-18",
+            Self::V2025_11_25 => "2025-11-25",
+            Self::V2026_07_28 => "2026-07-28",
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // JSON-RPC 2.0 message types
@@ -23,6 +76,8 @@ pub struct JsonRpcMessage {
     pub method: Option<String>,
     #[serde(default)]
     pub params: Option<Value>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 fn deserialize_some<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
@@ -46,6 +101,8 @@ pub struct JsonRpcResponse {
 pub struct JsonRpcError {
     pub code: i64,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
 }
 
 impl JsonRpcResponse {
@@ -59,11 +116,19 @@ impl JsonRpcResponse {
     }
 
     pub fn err(id: Value, code: i64, message: String) -> Self {
+        Self::err_with_data(id, code, message, None)
+    }
+
+    pub fn err_with_data(id: Value, code: i64, message: String, data: Option<Value>) -> Self {
         Self {
             jsonrpc: "2.0".into(),
             id,
             result: None,
-            error: Some(JsonRpcError { code, message }),
+            error: Some(JsonRpcError {
+                code,
+                message,
+                data,
+            }),
         }
     }
 
@@ -79,8 +144,14 @@ impl JsonRpcResponse {
 #[derive(Debug, Serialize)]
 pub struct ToolResult {
     pub content: Vec<TextContent>,
+    #[serde(rename = "structuredContent", skip_serializing_if = "Option::is_none")]
+    pub structured_content: Option<Box<Value>>,
     #[serde(rename = "isError", skip_serializing_if = "std::ops::Not::not")]
     pub is_error: bool,
+    #[serde(skip)]
+    modern_text: Option<String>,
+    #[serde(skip)]
+    structured_content_type: Option<TypeId>,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,7 +168,29 @@ impl ToolResult {
                 content_type: "text".into(),
                 text,
             }],
+            structured_content: None,
             is_error: false,
+            modern_text: None,
+            structured_content_type: None,
+        }
+    }
+
+    pub fn structured<T>(legacy_text: String, modern_text: String, output: &T) -> Self
+    where
+        T: Serialize + 'static,
+    {
+        match serde_json::to_value(output) {
+            Ok(structured_content) => Self {
+                content: vec![TextContent {
+                    content_type: "text".into(),
+                    text: legacy_text,
+                }],
+                structured_content: Some(Box::new(structured_content)),
+                is_error: false,
+                modern_text: Some(modern_text),
+                structured_content_type: Some(TypeId::of::<T>()),
+            },
+            Err(error) => Self::error(format!("structured output serialization failed: {error}")),
         }
     }
 
@@ -107,8 +200,28 @@ impl ToolResult {
                 content_type: "text".into(),
                 text,
             }],
+            structured_content: None,
             is_error: true,
+            modern_text: None,
+            structured_content_type: None,
         }
+    }
+
+    pub(crate) fn structured_content_type(&self) -> Option<TypeId> {
+        self.structured_content_type
+    }
+
+    pub fn select_projection(&mut self, modern: bool) {
+        if modern {
+            if let Some(text) = self.modern_text.take() {
+                if let Some(content) = self.content.last_mut() {
+                    content.text = text;
+                }
+            }
+        } else {
+            self.structured_content = None;
+        }
+        self.modern_text = None;
     }
 
     /// Append a hint to the last text content block.
@@ -170,16 +283,25 @@ mod tests {
 
     #[test]
     fn test_append_hint() {
-        let mut result = ToolResult::text("original".into());
+        let mut result =
+            ToolResult::structured("legacy".into(), "original".into(), &json!({"value": 1}));
+        result.select_projection(true);
         result.append_hint("\n[nudge]");
         assert_eq!(result.content[0].text, "original\n[nudge]");
+        assert_eq!(
+            result.structured_content,
+            Some(Box::new(json!({"value": 1})))
+        );
     }
 
     #[test]
     fn test_append_hint_empty_content() {
         let mut result = ToolResult {
             content: vec![],
+            structured_content: None,
             is_error: false,
+            modern_text: None,
+            structured_content_type: None,
         };
         result.append_hint("[hint]");
         assert!(result.content.is_empty());

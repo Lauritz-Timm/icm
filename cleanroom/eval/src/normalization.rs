@@ -358,6 +358,7 @@ fn normalize_pointer(
 }
 
 fn replace_ulids(text: &str, dynamic_values: &mut BTreeMap<String, String>) -> Result<String> {
+    let structured_id_was_normalized = !dynamic_values.is_empty();
     let mut output = String::with_capacity(text.len());
     let bytes = text.as_bytes();
     let mut index = 0;
@@ -377,7 +378,7 @@ fn replace_ulids(text: &str, dynamic_values: &mut BTreeMap<String, String>) -> R
         output.push(character);
         index += character.len_utf8();
     }
-    if output == text {
+    if !structured_id_was_normalized && output == text {
         anyhow::bail!("expected generated ULID was absent at declared text pointer");
     }
     Ok(output)
@@ -461,5 +462,15 @@ mod tests {
             normalized.pointer("/response/result/content/0/text"),
             normalized.pointer("/text")
         );
+    }
+
+    #[test]
+    fn candidate_text_may_remove_a_baseline_dynamic_id() {
+        let mut values = BTreeMap::from([("structured-id".into(), "<DYNAMIC_ULID_1>".into())]);
+        assert_eq!(
+            replace_ulids("Feedback recorded.", &mut values).unwrap(),
+            "Feedback recorded."
+        );
+        assert!(replace_ulids("Feedback recorded.", &mut BTreeMap::new()).is_err());
     }
 }

@@ -1,5 +1,56 @@
 use serde::{Deserialize, Serialize};
-use serde_json::Value;
+use serde_json::{Map, Value};
+
+pub const SUPPORTED_PROTOCOL_VERSIONS: [&str; 4] = [
+    ProtocolRevision::V2026_07_28.as_str(),
+    ProtocolRevision::V2025_11_25.as_str(),
+    ProtocolRevision::V2025_06_18.as_str(),
+    ProtocolRevision::V2024_11_05.as_str(),
+];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProtocolEra {
+    InitializationBased,
+    PerRequest,
+}
+
+impl ProtocolEra {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::InitializationBased => "initialization-based",
+            Self::PerRequest => "per-request",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ProtocolRevision {
+    V2024_11_05,
+    V2025_06_18,
+    V2025_11_25,
+    V2026_07_28,
+}
+
+impl ProtocolRevision {
+    pub const fn parse_exact(value: &str) -> Option<Self> {
+        match value.as_bytes() {
+            b"2024-11-05" => Some(Self::V2024_11_05),
+            b"2025-06-18" => Some(Self::V2025_06_18),
+            b"2025-11-25" => Some(Self::V2025_11_25),
+            b"2026-07-28" => Some(Self::V2026_07_28),
+            _ => None,
+        }
+    }
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::V2024_11_05 => "2024-11-05",
+            Self::V2025_06_18 => "2025-06-18",
+            Self::V2025_11_25 => "2025-11-25",
+            Self::V2026_07_28 => "2026-07-28",
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // JSON-RPC 2.0 message types
@@ -23,6 +74,8 @@ pub struct JsonRpcMessage {
     pub method: Option<String>,
     #[serde(default)]
     pub params: Option<Value>,
+    #[serde(flatten)]
+    pub extra: Map<String, Value>,
 }
 
 fn deserialize_some<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
@@ -46,6 +99,8 @@ pub struct JsonRpcResponse {
 pub struct JsonRpcError {
     pub code: i64,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<Value>,
 }
 
 impl JsonRpcResponse {
@@ -59,11 +114,19 @@ impl JsonRpcResponse {
     }
 
     pub fn err(id: Value, code: i64, message: String) -> Self {
+        Self::err_with_data(id, code, message, None)
+    }
+
+    pub fn err_with_data(id: Value, code: i64, message: String, data: Option<Value>) -> Self {
         Self {
             jsonrpc: "2.0".into(),
             id,
             result: None,
-            error: Some(JsonRpcError { code, message }),
+            error: Some(JsonRpcError {
+                code,
+                message,
+                data,
+            }),
         }
     }
 

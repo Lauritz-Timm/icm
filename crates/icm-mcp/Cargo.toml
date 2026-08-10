@@ -23,6 +23,7 @@ icm-store = { path = "../icm-store", default-features = false }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+schemars = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 

@@ -19,11 +19,13 @@ mod import;
 mod install_manifest;
 #[cfg(test)]
 mod learn_tests;
+mod mcp_http;
 // First-launch onnxruntime resolution for the load-dynamic embeddings build
 // (issue #345). Only the dynamic build needs a runtime downloaded at execution
 // time; the static build links onnxruntime in.
 #[cfg(feature = "embeddings-dynamic")]
 mod ort_runtime;
+mod proxy;
 mod recall_format;
 mod summarizer;
 #[cfg(feature = "tui")]
@@ -454,6 +456,8 @@ enum Commands {
     /// signal (0 = clean). See issue #229.
     Uninstall(uninstall::UninstallOpts),
 
+    /// Bridge line-framed stdio MCP to a warm loopback HTTP service.
+    Proxy(proxy::ProxyArgs),
     /// List files the agent has worked in during recent sessions.
     ///
     /// Rows are populated automatically by the PostToolUse hook
@@ -747,7 +751,7 @@ enum Commands {
         /// store load ONCE and stay warm across requests (~9 s saved
         /// per call vs. one-shot CLI). Default bind is what you pass;
         /// `127.0.0.1:<port>` keeps the server localhost-only.
-        /// Endpoints: POST /recall, POST /store, POST /consolidate,
+        /// Endpoints: POST /mcp, POST /recall, POST /store, POST /consolidate,
         /// GET /stats, GET /topics, GET /health. Issue #290.
         #[cfg(feature = "http-api")]
         #[arg(long, value_name = "ADDR")]
@@ -1600,6 +1604,9 @@ fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+    if let Commands::Proxy(args) = &cli.command {
+        return proxy::run(args);
+    }
     let cfg = config::load_config()?;
     let embeddings_enabled =
         cfg.embeddings.enabled && !cli.no_embeddings && std::env::var("ICM_NO_EMBEDDINGS").is_err();
@@ -2040,6 +2047,7 @@ fn main() -> Result<()> {
         Commands::Doctor => cmd_doctor(&db_path),
         Commands::Repair { dry_run } => cmd_repair(&db_path, dry_run),
         Commands::Uninstall(_) => unreachable!("dispatched before open_store"),
+        Commands::Proxy(_) => unreachable!("dispatched before configuration loading"),
         // `icm embeddings` is dispatched before `open_store` above; this arm
         // exists only for match exhaustiveness and is unreachable.
         Commands::Embeddings { .. } => unreachable!("dispatched before open_store"),
@@ -2170,6 +2178,13 @@ fn main() -> Result<()> {
             #[cfg(feature = "http-api")]
             token,
         } => {
+            // --compact overrides config; both transports share the same
+            // service policy.
+            let use_compact = compact || cfg.mcp.compact;
+            let auto_consolidate = icm_mcp::AutoConsolidate {
+                enabled: cfg.memory.auto_consolidate_enabled,
+                threshold: cfg.memory.auto_consolidate_threshold,
+            };
             #[cfg(feature = "web")]
             if expose {
                 let password = web::resolve_password(&cfg.web)?;
@@ -2188,22 +2203,19 @@ fn main() -> Result<()> {
             if let Some(addr) = http {
                 let boxed_emb: Option<Box<dyn icm_core::Embedder + Send + Sync>> =
                     embedder.map(|e| Box::new(e) as Box<dyn icm_core::Embedder + Send + Sync>);
-                return http_api::run_http_server(store, boxed_emb, addr, token);
+                return http_api::run_http_server(
+                    store,
+                    boxed_emb,
+                    addr,
+                    token,
+                    use_compact,
+                    auto_consolidate,
+                );
             }
             #[cfg(feature = "embeddings")]
             let emb_ref = embedder.as_ref().map(|e| e as &dyn icm_core::Embedder);
             #[cfg(not(feature = "embeddings"))]
             let emb_ref: Option<&dyn icm_core::Embedder> = None;
-            // --compact flag overrides, otherwise use config (default: true)
-            let use_compact = compact || cfg.mcp.compact;
-            // Honor the auto-consolidation config on the MCP store path
-            // (issue #318): previously it was hardcoded always-on at 10,
-            // ignoring an explicit `auto_consolidate_enabled = false` and
-            // destructively rolling up topics. Default config disables it.
-            let auto_consolidate = icm_mcp::AutoConsolidate {
-                enabled: cfg.memory.auto_consolidate_enabled,
-                threshold: cfg.memory.auto_consolidate_threshold,
-            };
             icm_mcp::run_server(&store, emb_ref, use_compact, auto_consolidate)
         }
         Commands::HookLog {

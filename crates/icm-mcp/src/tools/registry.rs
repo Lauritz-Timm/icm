@@ -42,6 +42,10 @@ fn normalize_legacy_recall_input(arguments: &Value) -> Value {
 }
 
 macro_rules! tool_spec {
+    // Keep the registration syntax readable while parsing the optional named
+    // arguments with a token-tree tail. An optional `expr` matcher next to the
+    // annotations expression is locally ambiguous when `requirements:` is
+    // present, so parse those markers explicitly in the internal arms below.
     (
         $input:ty,
         json!({
@@ -49,70 +53,68 @@ macro_rules! tool_spec {
             "description": $description:literal,
             "inputSchema": $input_schema:tt
         }),
-        $annotations:expr,
-        $handler:expr
+        $($tail:tt)*
     ) => {
-        ToolSpec::typed::<$input>(
+        tool_spec!(@parse
+            $input,
             $name,
             $description,
-            json!($input_schema),
+            $input_schema,
             None,
-            $annotations,
             ToolRequirements::STORE,
-            $handler,
+            $($tail)*
         )
     };
     (
+        @parse
         $input:ty,
-        json!({
-            "name": $name:literal,
-            "description": $description:literal,
-            "inputSchema": $input_schema:tt
-        }),
-        legacy_normalizer: $legacy_normalizer:expr,
-        $annotations:expr,
-        $handler:expr
+        $name:literal,
+        $description:literal,
+        $input_schema:tt,
+        $legacy_normalizer:expr,
+        $requirements:expr,
+        legacy_normalizer: $normalizer:expr,
+        $($tail:tt)*
     ) => {
-        ToolSpec::typed::<$input>(
+        tool_spec!(@parse
+            $input,
             $name,
             $description,
-            json!($input_schema),
-            Some($legacy_normalizer),
-            $annotations,
-            ToolRequirements::STORE,
-            $handler,
-        )
-    };
-    (
-        $input:ty,
-        json!({
-            "name": $name:literal,
-            "description": $description:literal,
-            "inputSchema": $input_schema:tt
-        }),
-        requirements: $requirements:expr,
-        $annotations:expr,
-        $handler:expr
-    ) => {
-        ToolSpec::typed::<$input>(
-            $name,
-            $description,
-            json!($input_schema),
-            None,
-            $annotations,
+            $input_schema,
+            Some($normalizer),
             $requirements,
-            $handler,
+            $($tail)*
         )
     };
     (
+        @parse
         $input:ty,
-        json!({
-            "name": $name:literal,
-            "description": $description:literal,
-            "inputSchema": $input_schema:tt
-        }),
-        legacy_normalizer: $legacy_normalizer:expr,
-        requirements: $requirements:expr,
+        $name:literal,
+        $description:literal,
+        $input_schema:tt,
+        $legacy_normalizer:expr,
+        $requirements:expr,
+        requirements: $requirements_override:expr,
+        $($tail:tt)*
+    ) => {
+        tool_spec!(@parse
+            $input,
+            $name,
+            $description,
+            $input_schema,
+            $legacy_normalizer,
+            $requirements_override,
+            $($tail)*
+        )
+    };
+    (
+        @parse
+        $input:ty,
+        $name:literal,
+        $description:literal,
+        $input_schema:tt,
+        $legacy_normalizer:expr,
+        $requirements:expr,
         $annotations:expr,
         $handler:expr
     ) => {
@@ -120,7 +122,7 @@ macro_rules! tool_spec {
             $name,
             $description,
             json!($input_schema),
-            Some($legacy_normalizer),
+            $legacy_normalizer,
             $annotations,
             $requirements,
             $handler,

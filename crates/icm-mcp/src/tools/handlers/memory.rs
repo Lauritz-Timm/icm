@@ -1,12 +1,11 @@
 //! MCP memory tool handlers.
 
-use chrono::Utc;
 use serde_json::Value;
 
+use chrono::Utc;
 use icm_core::{
-    add_backrefs, auto_link_memory, build_wake_up, find_similar_memory, format_local,
-    AutoLinkOptions, Embedder, Memory, MemoryStore, WakeUpFormat, WakeUpOptions,
-    DEDUP_SIMILARITY_THRESHOLD, MSG_NO_MEMORIES,
+    build_wake_up, format_local, Embedder, Memory, MemoryStore, WakeUpFormat, WakeUpOptions,
+    MSG_NO_MEMORIES,
 };
 use icm_store::Store;
 
@@ -15,8 +14,8 @@ use crate::outputs::{MemoryRecallOutput, MemoryStatsOutput, MemoryTopicsOutput, 
 use crate::protocol::ToolResult;
 
 use super::common::{
-    format_memory_output, get_i64, get_str, matches_memory_filters, parse_keywords, resolve_memoir,
-    try_auto_consolidate, AutoConsolidate, MAX_CONTENT_LEN, MAX_TOPIC_LEN,
+    format_memory_output, get_i64, get_str, parse_keywords, resolve_memoir, AutoConsolidate,
+    MAX_CONTENT_LEN, MAX_TOPIC_LEN,
 };
 
 pub(in crate::tools) fn tool_wake_up(store: &Store, args: &Value) -> ToolResult {
@@ -65,20 +64,16 @@ pub(in crate::tools) fn tool_store(
         Some(c) => c,
         None => return ToolResult::error("missing required field: content".into()),
     };
+    let topic = topic.trim();
 
-    // Empty-string validation: the inputSchema marks `topic` and
-    // `content` as required, but JSON allows passing `""` which slips
-    // past the structural check. Reject explicitly so callers don't
-    // silently end up with a memory under a blank topic that they
-    // can't meaningfully recall.
-    if topic.trim().is_empty() {
+    // Preserve the compatibility handler's validation wording before handing
+    // the actual operation to the shared transport-neutral implementation.
+    if topic.is_empty() {
         return ToolResult::error("topic must not be empty".into());
     }
     if content.trim().is_empty() {
         return ToolResult::error("content must not be empty".into());
     }
-
-    // Input length validation
     if topic.len() > MAX_TOPIC_LEN {
         return ToolResult::error(format!(
             "topic exceeds maximum length ({} > {MAX_TOPIC_LEN} UTF-8 bytes)",
@@ -92,161 +87,79 @@ pub(in crate::tools) fn tool_store(
         ));
     }
 
-    let importance_str = get_str(args, "importance").unwrap_or("medium");
-    let importance = importance_str
+    let importance = get_str(args, "importance")
+        .unwrap_or("medium")
         .parse()
         .unwrap_or(icm_core::Importance::Medium);
-
-    let mut memory = Memory::new(topic.into(), content.into(), importance);
-
-    let kw = parse_keywords(args);
-    if !kw.is_empty() {
-        memory.keywords = kw;
-    }
-
-    if let Some(raw) = get_str(args, "raw_excerpt") {
-        memory.raw_excerpt = Some(raw.into());
-    }
-
-    // Auto-embed if embedder is available
-    let embed_text = memory.embed_text();
-    let embed_vec = if let Some(emb) = embedder {
-        match emb.embed(&embed_text) {
-            Ok(vec) => Some(vec),
-            Err(e) => {
-                tracing::warn!("embedding failed: {e}");
-                None
-            }
-        }
-    } else {
-        None
-    };
-
-    if let Some(ref vec) = embed_vec {
-        memory.embedding = Some(vec.clone());
-    }
-
-    // Dedup check: if a very similar memory exists in the same topic, update it instead
-    if let Some(ref query_emb) = embed_vec {
-        if let Ok(Some((existing, score))) = find_similar_memory(
-            store,
-            &embed_text,
-            query_emb,
+    let keywords = parse_keywords(args);
+    let result = match crate::memory::store_memory(
+        store,
+        embedder,
+        &crate::memory::StoreOptions {
             topic,
-            DEDUP_SIMILARITY_THRESHOLD,
-        ) {
-            let updated = Memory {
-                id: existing.id.clone(),
-                created_at: existing.created_at,
-                last_accessed: existing.last_accessed,
-                access_count: existing.access_count,
-                weight: 1.0,
-                topic: existing.topic.clone(),
-                summary: content.to_string(),
-                raw_excerpt: get_str(args, "raw_excerpt")
-                    .map(|r| r.into())
-                    .or_else(|| existing.raw_excerpt.clone()),
-                keywords: {
-                    let kw = parse_keywords(args);
-                    if kw.is_empty() {
-                        existing.keywords.clone()
-                    } else {
-                        kw
-                    }
-                },
-                embedding: Some(query_emb.clone()),
-                // Never let a near-dup merge downgrade importance: an MCP
-                // caller that omits `importance` defaults to Medium, which
-                // would otherwise silently demote an existing Critical
-                // memory into decay/prune eligibility (audit finding).
-                importance: icm_core::max_importance(existing.importance, importance),
-                source: existing.source.clone(),
-                related_ids: existing.related_ids.clone(),
-                updated_at: Utc::now(),
-                scope: existing.scope,
-            };
-            if let Err(e) = store.update(&updated) {
-                return ToolResult::error(format!("failed to update: {e}"));
-            }
-            return if compact {
-                ToolResult::text(format!("ok:{}", updated.id))
-            } else {
-                ToolResult::text(format!(
-                    "Updated existing memory (similarity {score:.2}): {}",
-                    updated.id
-                ))
-            };
-        }
-    }
-
-    // Auto-link: populate `related_ids` with similar existing memories BEFORE
-    // storing, so the new memory lands in the DB with its forward edges
-    // already set. Back-refs are added AFTER storing so the linked memories
-    // point to an id that exists in the DB.
-    let auto_link_opts = AutoLinkOptions::default();
-    let linked_ids = if memory.embedding.is_some() {
-        auto_link_memory(store, &mut memory, &auto_link_opts).unwrap_or_else(|e| {
-            tracing::warn!("auto-link failed: {e}");
-            Vec::new()
-        })
-    } else {
-        Vec::new()
+            content,
+            importance,
+            keywords: &keywords,
+            raw_excerpt: get_str(args, "raw_excerpt"),
+            auto_consolidate,
+        },
+    ) {
+        Ok(result) => result,
+        Err(error) => return ToolResult::error(format!("failed to store: {error}")),
     };
 
-    match store.store(memory) {
-        Ok(id) => {
-            // Best-effort back-ref update. Failure here leaves an asymmetric
-            // edge (forward-only) but does not fail the store call.
-            if !linked_ids.is_empty() {
-                if let Err(e) = add_backrefs(store, &id, &linked_ids) {
-                    tracing::warn!("auto-link back-ref update failed: {e}");
-                }
-            }
+    if result.deduplicated {
+        return if compact {
+            ToolResult::text(format!("ok:{}", result.memory.id))
+        } else {
+            ToolResult::text(format!(
+                "Updated existing memory (similarity {:.2}): {}",
+                result.similarity.unwrap_or_default(),
+                result.memory.id
+            ))
+        };
+    }
 
-            let link_suffix = if linked_ids.is_empty() {
-                String::new()
+    let link_suffix = if result.linked_ids.is_empty() {
+        String::new()
+    } else {
+        format!(
+            " (+{} link{})",
+            result.linked_ids.len(),
+            if result.linked_ids.len() == 1 {
+                ""
             } else {
-                format!(
-                    " (+{} link{})",
-                    linked_ids.len(),
-                    if linked_ids.len() == 1 { "" } else { "s" }
-                )
-            };
-
-            if compact {
-                // Try auto-consolidation even in compact mode
-                let consolidation_msg =
-                    try_auto_consolidate(store, embedder, topic, auto_consolidate);
-                if consolidation_msg.is_empty() {
-                    ToolResult::text(format!("ok:{id}{link_suffix}"))
-                } else {
-                    ToolResult::text(format!("ok:{id}{link_suffix}\n{consolidation_msg}"))
-                }
-            } else {
-                let consolidation_msg =
-                    try_auto_consolidate(store, embedder, topic, auto_consolidate);
-                if consolidation_msg.is_empty() {
-                    // Still show a nudge if approaching threshold
-                    let hint = if let Ok(count) = store.count_by_topic(topic) {
-                        if count > 7 {
-                            format!(
-                                "\nNote: Topic '{topic}' has {count} entries — consider consolidating with icm_memory_consolidate."
-                            )
-                        } else {
-                            String::new()
-                        }
-                    } else {
-                        String::new()
-                    };
-                    ToolResult::text(format!("Stored memory: {id}{link_suffix}{hint}"))
-                } else {
-                    ToolResult::text(format!(
-                        "Stored memory: {id}{link_suffix}\n{consolidation_msg}"
-                    ))
-                }
+                "s"
             }
+        )
+    };
+    let consolidation_message = result.consolidation_message.unwrap_or_default();
+
+    if compact {
+        if consolidation_message.is_empty() {
+            ToolResult::text(format!("ok:{}{link_suffix}", result.memory.id))
+        } else {
+            ToolResult::text(format!(
+                "ok:{}{link_suffix}\n{consolidation_message}",
+                result.memory.id
+            ))
         }
-        Err(e) => ToolResult::error(format!("failed to store: {e}")),
+    } else if consolidation_message.is_empty() {
+        let hint = match store.count_by_topic(topic) {
+            Ok(count) if count > 7 => format!(
+                "\nNote: Topic '{topic}' has {count} entries — consider consolidating with icm_memory_consolidate."
+            ),
+            _ => String::new(),
+        };
+        ToolResult::text(format!(
+            "Stored memory: {}{link_suffix}{hint}",
+            result.memory.id
+        ))
+    } else {
+        ToolResult::text(format!(
+            "Stored memory: {}{link_suffix}\n{consolidation_message}",
+            result.memory.id
+        ))
     }
 }
 
@@ -267,164 +180,47 @@ fn recall_result(
     ToolResult::structured(legacy, format!("Found {} memories.", output.len()), &output)
 }
 
-fn update_recall_access(store: &Store, memories: &mut [(Memory, f32)]) {
-    let refreshed = {
-        let ids: Vec<&str> = memories
-            .iter()
-            .map(|(memory, _)| memory.id.as_str())
-            .collect();
-        match store.batch_update_access(&ids) {
-            Ok(0) | Err(_) => return,
-            Ok(_) => store.get_many(&ids),
-        }
-    };
-    if let Ok(mut refreshed) = refreshed {
-        for (memory, _) in memories {
-            if let Some(current) = refreshed.remove(&memory.id) {
-                *memory = current;
-            }
-        }
-    }
-}
-
 pub(in crate::tools) fn tool_recall(context: &ToolContext<'_>, args: &Value) -> ToolResult {
-    let store = context.store;
-    let embedder = context.embedder;
-    let compact = context.compact;
-    // Auto-decay if >24h since last decay
-    if let Err(e) = store.maybe_auto_decay() {
-        tracing::warn!(error = %e, "auto-decay failed during recall");
-    }
-
     let query = match get_str(args, "query") {
         Some(q) => q,
         None => return ToolResult::error("missing required field: query".into()),
     };
-    // The modern input contract extends the historical advertised maximum
-    // from 20 to the frozen Phase 2 boundary of 100. Keep the handler cap in
-    // lockstep so valid modern calls are not silently truncated.
     let limit = get_i64(args, "limit", 5).clamp(1, 100) as usize;
-    let topic = get_str(args, "topic");
-    let keyword = get_str(args, "keyword");
-
-    // Project filter: same hard segment-aware filter applied to the CLI
-    // `recall_context` path (extract.rs) so MCP-side recall can't leak
-    // memories from other projects. Caller can override via the explicit
-    // `project` arg (empty string disables the filter); otherwise we
-    // derive it from the server's cwd via the shared icm-core detection
-    // (git remote first) — the CLI hooks store under that name, so a raw
-    // cwd basename would silently miss on renamed checkouts (audit finding).
-    let project_arg = get_str(args, "project");
-    let cwd_project =
-        icm_core::project::project_from_path(&context.working_directory.to_string_lossy());
-    let project: Option<String> = match project_arg {
-        Some("") => None,
-        Some(p) => Some(p.to_string()),
-        None => cwd_project,
-    };
-    let memory_filter =
-        |memory: &Memory| matches_memory_filters(memory, project.as_deref(), topic, keyword);
-
-    // Audit finding: filters were applied AFTER the store already truncated
-    // to `limit` — if the top-`limit` global hits all belonged to other
-    // projects/topics, filtering left nothing and recall reported "no
-    // memories" even though relevant matches existed further down the
-    // ranked list. When any filter is active, request a much larger
-    // candidate pool so filtering has enough to work with, then truncate to
-    // the caller's requested `limit` at the very end (capped — this is a
-    // memory-scoped search, not a paginated export).
-    let filters_active = project.is_some() || topic.is_some() || keyword.is_some();
-    let query_limit = if filters_active {
-        (limit * 10).min(200)
-    } else {
-        limit
+    let project = get_str(args, "project");
+    let recall = match crate::memory::recall_memories(
+        context.store,
+        context.embedder,
+        &crate::memory::RecallOptions {
+            query,
+            limit,
+            topic: get_str(args, "topic"),
+            keyword: get_str(args, "keyword"),
+            project,
+            working_directory: context.working_directory,
+        },
+    ) {
+        Ok(recall) => recall,
+        Err(error) => return ToolResult::error(format!("search error: {error}")),
     };
 
-    // Try hybrid search if embedder is available
-    if let Some(emb) = embedder {
-        if let Ok(query_emb) = emb.embed_query(query) {
-            if let Ok(results) = store.search_hybrid(query, &query_emb, query_limit) {
-                let mut scored_results = results;
-                scored_results.retain(|(memory, _)| memory_filter(memory));
-
-                // Graph-aware expansion: follow `related_ids` one hop from
-                // each primary hit and fold neighbors into the result set.
-                // Neighbors carry a discounted score so they rank below
-                // direct matches but can displace weak primary results.
-                //
-                // Audit R13b: neighbors are fetched by id without going
-                // through the project / topic / keyword filters above,
-                // so a project-A primary hit can pull in a project-B
-                // neighbor via auto-linked `related_ids`. Re-apply the
-                // filters to `expanded` so the caller's scope is honored.
-                let max_neighbors = (query_limit / 3).max(1);
-                let mut expanded = store
-                    .expand_with_neighbors(&scored_results, max_neighbors, 0.5, query_limit)
-                    .unwrap_or(scored_results);
-                expanded.retain(|(memory, _)| memory_filter(memory));
-                expanded.truncate(limit);
-
-                // Batch update access counts (includes expanded neighbors)
-                update_recall_access(store, &mut expanded);
-
-                return recall_result(
-                    query,
-                    project.as_deref(),
-                    SearchMode::Hybrid,
-                    &expanded,
-                    compact,
-                    true,
-                );
-            }
-        }
-    }
-
-    // Fallback: FTS then keywords
-    let mut search_mode = SearchMode::FullText;
-    let mut results = match store.search_fts(query, query_limit) {
-        Ok(r) => r,
-        Err(e) => return ToolResult::error(format!("search error: {e}")),
+    let include_scores = recall.search_mode == crate::memory::RecallSearchMode::Hybrid;
+    let memories: Vec<(Memory, f32)> = recall
+        .hits
+        .into_iter()
+        .map(|(memory, score)| (memory, score.unwrap_or(-1.0)))
+        .collect();
+    let search_mode = match recall.search_mode {
+        crate::memory::RecallSearchMode::Hybrid => SearchMode::Hybrid,
+        crate::memory::RecallSearchMode::FullText => SearchMode::FullText,
+        crate::memory::RecallSearchMode::Keyword => SearchMode::Keyword,
     };
-
-    if results.is_empty() {
-        search_mode = SearchMode::Keyword;
-        let keywords: Vec<&str> = query.split_whitespace().collect();
-        results = match store.search_by_keywords(&keywords, query_limit) {
-            Ok(r) => r,
-            Err(e) => return ToolResult::error(format!("search error: {e}")),
-        };
-    }
-
-    results.retain(|memory| memory_filter(memory));
-    results.truncate(limit);
-
-    // Convert to scored format with a sentinel score of 1.0 (FTS fallback
-    // doesn't expose a real similarity score, but we still want the graph
-    // expansion to score neighbors relative to their primary parent).
-    let scored: Vec<(Memory, f32)> = results.into_iter().map(|m| (m, 1.0)).collect();
-
-    // Graph-aware expansion also applies in the fallback path so that
-    // keyword-only deployments benefit from auto-linked memories.
-    // Same R13b re-filter as the hybrid path.
-    let max_neighbors = (limit / 3).max(1);
-    let mut expanded = store
-        .expand_with_neighbors(&scored, max_neighbors, 0.5, limit)
-        .unwrap_or(scored);
-    expanded.retain(|(memory, _)| memory_filter(memory));
-
-    // Batch update access counts (includes expanded neighbors)
-    update_recall_access(store, &mut expanded);
-
-    // FTS-path results have synthetic scores — reset to -1.0 for display
-    // so we don't claim a hybrid-search confidence we didn't compute.
-    let for_display: Vec<(Memory, f32)> = expanded.into_iter().map(|(m, _)| (m, -1.0)).collect();
     recall_result(
         query,
-        project.as_deref(),
+        recall.effective_project.as_deref(),
         search_mode,
-        &for_display,
-        compact,
-        false,
+        &memories,
+        context.compact,
+        include_scores,
     )
 }
 

@@ -468,6 +468,21 @@ fn apply_initialize_response(
     Ok(())
 }
 
+fn validate_notification_ack(status: u16, body: &[u8]) -> Result<bool, String> {
+    if status == 202 && body.is_empty() {
+        return Ok(true);
+    }
+    if (200..300).contains(&status) {
+        return Err(format!(
+            "upstream notification must return HTTP 202 with an empty body (got HTTP {status})"
+        ));
+    }
+    if body.is_empty() {
+        return Err(format!("upstream returned HTTP {status}"));
+    }
+    Ok(false)
+}
+
 fn forward_once(
     agent: &ureq::Agent,
     endpoint: &str,
@@ -484,9 +499,12 @@ fn forward_once(
         .set(WORKING_DIRECTORY_HEADER, &state.working_directory);
     if meta.protocol_version == "2026-07-28" {
         request = request.set("Mcp-Method", &meta.method);
-        if let Some(name) = meta.name.as_deref() {
-            request = request.set("Mcp-Name", &encode_header_value(name));
-        }
+        let header_name = meta
+            .name
+            .as_deref()
+            .map(encode_header_value)
+            .unwrap_or_default();
+        request = request.set("Mcp-Name", &header_name);
     }
     // The initialize body advertises the client's requested revision. Do not
     // turn that unnegotiated value into a transport assertion: the service
@@ -538,7 +556,7 @@ fn forward_once(
     if content_length.is_some_and(|length| length != body.len()) {
         return Err("upstream response was truncated".into());
     }
-    if meta.is_notification() && status == 202 && body.is_empty() {
+    if meta.is_notification() && validate_notification_ack(status, &body)? {
         if meta.method == "notifications/initialized" {
             state.initialized_notification = Some(raw.to_vec());
         }
@@ -843,6 +861,25 @@ data: "result":{"ok":true}}
             decode_response_body(wrong_id.to_vec(), "application/json", &meta, 400).unwrap_err(),
             "upstream response ID does not match request ID"
         );
+    }
+
+    #[test]
+    fn notification_requires_empty_202_acknowledgement() {
+        assert!(validate_notification_ack(202, b"").unwrap());
+
+        let err = validate_notification_ack(202, b"{}").unwrap_err();
+        assert!(err.contains("HTTP 202 with an empty body"));
+
+        let err = validate_notification_ack(200, b"").unwrap_err();
+        assert!(err.contains("HTTP 202 with an empty body"));
+
+        let err = validate_notification_ack(204, b"").unwrap_err();
+        assert!(err.contains("HTTP 202 with an empty body"));
+
+        // A transport error without a response body should preserve its
+        // status rather than reporting a misleading JSON parse failure.
+        let err = validate_notification_ack(400, b"").unwrap_err();
+        assert_eq!(err, "upstream returned HTTP 400");
     }
 
     #[test]

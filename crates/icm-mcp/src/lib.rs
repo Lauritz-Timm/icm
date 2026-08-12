@@ -1,5 +1,6 @@
 pub mod catalog;
 mod inputs;
+pub mod memory;
 mod outputs;
 pub mod protocol;
 pub mod server;

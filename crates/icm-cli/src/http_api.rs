@@ -46,11 +46,9 @@ use base64::engine::{general_purpose::STANDARD as BASE64, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
-use icm_core::{
-    is_preference_topic, keyword_matches, project_matches, topic_matches, Embedder, Importance,
-    Memory, MemoryStore, MSG_NO_MEMORIES,
-};
+use icm_core::{Embedder, Importance, Memory, MemoryStore, MSG_NO_MEMORIES};
 use icm_mcp::{
+    memory::{recall_memories, store_memory, RecallOptions, StoreOptions},
     protocol::{JsonRpcMessage, JsonRpcResponse, ProtocolRevision},
     service::{unsupported_protocol_version_error, ConnectionState, McpService},
     AutoConsolidate,
@@ -266,7 +264,8 @@ pub async fn run_http_server(
     let app = Router::new()
         .route(
             "/mcp",
-            post(handle_mcp)
+            get(handle_mcp_get_not_supported)
+                .post(handle_mcp)
                 .delete(handle_mcp_delete)
                 .layer(DefaultBodyLimit::max(MAX_MCP_REQUEST_BYTES)),
         )
@@ -325,6 +324,55 @@ async fn shutdown_signal() {
 // Handler: /mcp
 // ---------------------------------------------------------------------------
 
+/// Streamable HTTP MCP POSTs must advertise at least one response media type
+/// the server can emit. Parse the comma-separated Accept grammar rather than
+/// relying on a substring check so `q=0` cannot accidentally opt a type in.
+fn accepts_mcp_response(headers: &HeaderMap) -> bool {
+    let mut accepts_json = false;
+    let mut accepts_sse = false;
+    for item in headers
+        .get_all(header::ACCEPT)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+    {
+        let mut parts = item.split(';');
+        let media_type = parts.next().map(str::trim).unwrap_or_default();
+        let is_json = media_type.eq_ignore_ascii_case("application/json");
+        let is_sse = media_type.eq_ignore_ascii_case("text/event-stream");
+        if !is_json && !is_sse {
+            continue;
+        }
+        let mut quality = 1.0_f32;
+        let mut valid = true;
+        for parameter in parts {
+            let Some((name, value)) = parameter.trim().split_once('=') else {
+                continue;
+            };
+            if name.trim().eq_ignore_ascii_case("q") {
+                let Ok(parsed) = value.trim().parse::<f32>() else {
+                    valid = false;
+                    break;
+                };
+                if !parsed.is_finite() || !(0.0..=1.0).contains(&parsed) {
+                    valid = false;
+                    break;
+                }
+                quality = parsed;
+            }
+        }
+        if !valid || quality <= 0.0 {
+            continue;
+        }
+        accepts_json |= is_json;
+        accepts_sse |= is_sse;
+    }
+    // Streamable HTTP POST requests must advertise both response forms. This
+    // server currently emits JSON only, but requiring the full client contract
+    // keeps negotiation valid if SSE is added later.
+    accepts_json && accepts_sse
+}
+
 async fn handle_mcp(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -342,6 +390,15 @@ async fn handle_mcp(
             Value::Null,
             -32600,
             "content-type must be application/json",
+            None,
+        );
+    }
+    if !accepts_mcp_response(&headers) {
+        return mcp_http_error(
+            StatusCode::NOT_ACCEPTABLE,
+            Value::Null,
+            -32600,
+            "accept must include application/json and text/event-stream",
             None,
         );
     }
@@ -611,8 +668,16 @@ async fn handle_mcp(
     mcp_service_response(
         response,
         None,
-        protocol_version.unwrap_or(ProtocolRevision::V2024_11_05),
+        protocol_version.unwrap_or(if modern {
+            ProtocolRevision::V2026_07_28
+        } else {
+            ProtocolRevision::V2024_11_05
+        }),
     )
+}
+
+async fn handle_mcp_get_not_supported() -> StatusCode {
+    StatusCode::METHOD_NOT_ALLOWED
 }
 
 async fn handle_mcp_delete(State(state): State<AppState>, headers: HeaderMap) -> StatusCode {
@@ -708,10 +773,16 @@ fn validate_mcp_request_headers(
     if !unsupported_header && header_version != Some(current) && body_version != Some(current) {
         return Ok(());
     }
-    if header_version != body_version {
-        return Err("MCP-Protocol-Version header does not match request metadata".into());
+    // The body metadata and transport header are independent ways for a
+    // client to identify the modern revision. If both are present they must
+    // agree; either one may be omitted so clients do not have to duplicate
+    // the same protocol version in two layers.
+    if let (Some(header), Some(body)) = (header_version, body_version) {
+        if header != body {
+            return Err("MCP-Protocol-Version header does not match request metadata".into());
+        }
     }
-    if header_version != Some(current) {
+    if header_version != Some(current) && body_version != Some(current) {
         return Ok(());
     }
 
@@ -741,6 +812,7 @@ fn validate_mcp_request_headers(
     let header_name = single_header(headers, "mcp-name")?;
     match (expected_name, header_name) {
         (Some(expected), Some(actual)) if decode_mcp_name(actual)? == expected => Ok(()),
+        (None, Some(actual)) if !requires_name && actual.as_bytes().is_empty() => Ok(()),
         (None, None) if !requires_name => Ok(()),
         (Some(_), None) => Err("required Mcp-Name header is missing".into()),
         (None, None) => Err("request body is missing the required MCP name".into()),
@@ -998,75 +1070,26 @@ fn run_recall(state: &AppState, req: &RecallReq) -> Result<Vec<(Memory, Option<f
     if req.query.trim().is_empty() {
         anyhow::bail!("missing required field: query");
     }
+
     let store = lock_store(state);
-    if let Err(e) = store.maybe_auto_decay() {
-        tracing::warn!(error = %e, "auto-decay failed during /recall");
-    }
-
-    let limit = req.limit.unwrap_or(5).clamp(1, 100);
-
-    let project_filter = |m: &Memory| -> bool {
-        match req.project.as_deref() {
-            None | Some("") => true,
-            Some(p) => is_preference_topic(&m.topic) || project_matches(&m.topic, Some(p)),
-        }
-    };
-
-    let scored: Vec<(Memory, Option<f32>)> = if let Some(emb) = state.embedder_ref() {
-        match emb.embed_query(&req.query) {
-            Ok(q_emb) => match store.search_hybrid(&req.query, &q_emb, limit) {
-                Ok(rows) => rows
-                    .into_iter()
-                    .filter(|(m, _)| project_filter(m))
-                    .filter(|(m, _)| {
-                        req.topic
-                            .as_deref()
-                            .is_none_or(|t| topic_matches(&m.topic, t))
-                    })
-                    .filter(|(m, _)| {
-                        req.keyword
-                            .as_deref()
-                            .is_none_or(|k| keyword_matches(&m.keywords, k))
-                    })
-                    .map(|(m, s)| (m, Some(s)))
-                    .collect(),
-                Err(_) => fts_fallback(&store, req, &project_filter, limit)?,
-            },
-            Err(_) => fts_fallback(&store, req, &project_filter, limit)?,
-        }
-    } else {
-        fts_fallback(&store, req, &project_filter, limit)?
-    };
-
-    // Best-effort access bookkeeping (matches the MCP path).
-    let ids: Vec<&str> = scored.iter().map(|(m, _)| m.id.as_str()).collect();
-    let _ = store.batch_update_access(&ids);
-
-    Ok(scored)
-}
-
-fn fts_fallback<F>(
-    store: &Store,
-    req: &RecallReq,
-    project_filter: &F,
-    limit: usize,
-) -> Result<Vec<(Memory, Option<f32>)>>
-where
-    F: Fn(&Memory) -> bool,
-{
-    let mut rows = store.search_fts(&req.query, limit)?;
-    if rows.is_empty() {
-        let keywords: Vec<&str> = req.query.split_whitespace().collect();
-        rows = store.search_by_keywords(&keywords, limit)?;
-    }
-    rows.retain(project_filter);
-    if let Some(t) = req.topic.as_deref() {
-        rows.retain(|m| topic_matches(&m.topic, t));
-    }
-    if let Some(k) = req.keyword.as_deref() {
-        rows.retain(|m| keyword_matches(&m.keywords, k));
-    }
-    Ok(rows.into_iter().map(|m| (m, None)).collect())
+    // The HTTP API historically treated an omitted project as unrestricted;
+    // retain that public REST behavior while routing the actual operation
+    // through the same scoped MCP implementation. Callers can still provide
+    // an explicit project to apply the MCP segment-aware filter.
+    let project = req.project.as_deref().or(Some(""));
+    let result = recall_memories(
+        &store,
+        state.embedder_ref(),
+        &RecallOptions {
+            query: &req.query,
+            limit: req.limit.unwrap_or(5),
+            topic: req.topic.as_deref(),
+            keyword: req.keyword.as_deref(),
+            project,
+            working_directory: &state.daemon_working_directory,
+        },
+    )?;
+    Ok(result.hits)
 }
 
 fn render_recall(results: &[(Memory, Option<f32>)], format: OutputFormat) -> Response {
@@ -1111,35 +1134,59 @@ async fn handle_store(
             format,
         );
     }
+    if req.topic.trim().len() > icm_mcp::memory::MAX_TOPIC_LEN {
+        return err_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "topic exceeds maximum length ({} > {} UTF-8 bytes)",
+                req.topic.trim().len(),
+                icm_mcp::memory::MAX_TOPIC_LEN
+            ),
+            format,
+        );
+    }
+    if req.content.len() > icm_mcp::memory::MAX_CONTENT_LEN {
+        return err_response(
+            StatusCode::BAD_REQUEST,
+            &format!(
+                "content exceeds maximum length ({} > {} UTF-8 bytes)",
+                req.content.len(),
+                icm_mcp::memory::MAX_CONTENT_LEN
+            ),
+            format,
+        );
+    }
     let importance = match parse_importance(req.importance.as_deref()) {
         Ok(i) => i,
         Err(e) => return err_response(StatusCode::BAD_REQUEST, &e, format),
     };
     let keywords = parse_keywords_value(req.keywords.as_ref());
-
-    let mut mem = Memory::new(req.topic.clone(), req.content.clone(), importance);
-    mem.keywords = keywords;
-    if let Some(raw) = req.raw.as_deref().filter(|s| !s.is_empty()) {
-        mem.raw_excerpt = Some(raw.to_string());
-    }
-    if let Some(emb) = state.embedder_ref() {
-        if let Ok(v) = emb.embed(&format!("{} {}", mem.topic, mem.summary)) {
-            mem.embedding = Some(v);
+    let raw_excerpt = req.raw.as_deref().filter(|raw| !raw.is_empty());
+    let result = {
+        let store = lock_store(&state);
+        store_memory(
+            &store,
+            state.embedder_ref(),
+            &StoreOptions {
+                topic: &req.topic,
+                content: &req.content,
+                importance,
+                keywords: &keywords,
+                raw_excerpt,
+                auto_consolidate: state.auto_consolidate,
+            },
+        )
+    };
+    match result {
+        Ok(result) => render_recall(&[(result.memory, None)], format),
+        Err(error) => {
+            let status = if matches!(error, icm_core::IcmError::InvalidInput(_)) {
+                StatusCode::BAD_REQUEST
+            } else {
+                StatusCode::INTERNAL_SERVER_ERROR
+            };
+            err_response(status, &format!("store failed: {error}"), format)
         }
-    }
-
-    let outcome = lock_store(&state).store(mem.clone());
-    match outcome {
-        Ok(id) => {
-            let mut stored = mem;
-            stored.id = id;
-            render_recall(&[(stored, None)], format)
-        }
-        Err(e) => err_response(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("store failed: {e}"),
-            format,
-        ),
     }
 }
 
@@ -1392,6 +1439,13 @@ mod tests {
     fn h(name: &'static str, val: &str) -> HeaderMap {
         let mut h = HeaderMap::new();
         h.insert(name, HeaderValue::from_str(val).unwrap());
+        if name.eq_ignore_ascii_case("content-type") && val.eq_ignore_ascii_case("application/json")
+        {
+            h.insert(
+                header::ACCEPT,
+                HeaderValue::from_static("application/json, text/event-stream"),
+            );
+        }
         h
     }
 
@@ -1500,6 +1554,30 @@ mod tests {
         assert!(!constant_time_eq(b"secret", b"wrong!"));
         assert!(!constant_time_eq(b"short", b"longer-string"));
         assert!(constant_time_eq(b"", b""));
+    }
+
+    #[test]
+    fn mcp_accept_requires_both_supported_positive_quality_media_types() {
+        assert!(!accepts_mcp_response(&HeaderMap::new()));
+        assert!(accepts_mcp_response(&h(
+            "accept",
+            "application/json; charset=utf-8, text/event-stream;q=0.5"
+        )));
+        assert!(!accepts_mcp_response(&h("accept", "application/json")));
+        assert!(!accepts_mcp_response(&h("accept", "text/event-stream")));
+        assert!(!accepts_mcp_response(&h("accept", "application/json;q=0")));
+        assert!(!accepts_mcp_response(&h(
+            "accept",
+            "application/json, text/event-stream;q=0"
+        )));
+        assert!(!accepts_mcp_response(&h(
+            "accept",
+            "application/json;q=bogus, text/event-stream"
+        )));
+        assert!(!accepts_mcp_response(&h(
+            "accept",
+            "application/json;q=2, text/event-stream"
+        )));
     }
 
     #[test]
@@ -1772,6 +1850,109 @@ mod tests {
             Some(ProtocolRevision::V2026_07_28.as_str())
         )
         .is_err());
+    }
+
+    #[tokio::test]
+    async fn mcp_modern_version_can_be_body_only_or_header_only() {
+        let state = AppState {
+            store: Arc::new(Mutex::new(Store::in_memory().unwrap())),
+            embedder: None,
+            mcp_sessions: Arc::new(Mutex::new(HashMap::new())),
+            mcp_compact: false,
+            auto_consolidate: AutoConsolidate::default(),
+            daemon_working_directory: std::env::current_dir().unwrap().canonicalize().unwrap(),
+            token: None,
+        };
+
+        // Body-only modern metadata must reach the service instead of being
+        // rejected as a transport/header mismatch.
+        let mut body_only_headers = h("content-type", "application/json");
+        body_only_headers.insert("mcp-method", HeaderValue::from_static("ping"));
+        let response = handle_mcp(
+            State(state.clone()),
+            body_only_headers,
+            Query(McpQuery::default()),
+            Bytes::from_static(
+                br#"{"jsonrpc":"2.0","id":1,"method":"ping","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{}}}}"#,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap()["error"],
+            Value::Null
+        );
+
+        // Header-only modern negotiation is also accepted by the transport;
+        // the service then gives the normal invalid-params response because
+        // the modern body metadata is absent.
+        let mut header_only_headers = h("content-type", "application/json");
+        header_only_headers.insert(
+            "mcp-protocol-version",
+            HeaderValue::from_static("2026-07-28"),
+        );
+        header_only_headers.insert("mcp-method", HeaderValue::from_static("ping"));
+        let response = handle_mcp(
+            State(state),
+            header_only_headers,
+            Query(McpQuery::default()),
+            Bytes::from_static(br#"{"jsonrpc":"2.0","id":2,"method":"ping","params":{}}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Value>(&body).unwrap()["error"]["code"],
+            -31011
+        );
+    }
+
+    #[tokio::test]
+    async fn mcp_requires_an_acceptable_post_response_type() {
+        let state = AppState {
+            store: Arc::new(Mutex::new(Store::in_memory().unwrap())),
+            embedder: None,
+            mcp_sessions: Arc::new(Mutex::new(HashMap::new())),
+            mcp_compact: false,
+            auto_consolidate: AutoConsolidate::default(),
+            daemon_working_directory: std::env::current_dir().unwrap().canonicalize().unwrap(),
+            token: None,
+        };
+        let mut headers = HeaderMap::new();
+        headers.insert("content-type", HeaderValue::from_static("application/json"));
+        let response = handle_mcp(
+            State(state.clone()),
+            headers.clone(),
+            Query(McpQuery::default()),
+            Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
+
+        headers.insert("accept", HeaderValue::from_static("application/json"));
+        let response = handle_mcp(
+            State(state.clone()),
+            headers.clone(),
+            Query(McpQuery::default()),
+            Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
+
+        headers.insert("accept", HeaderValue::from_static("text/plain"));
+        let response = handle_mcp(
+            State(state),
+            headers,
+            Query(McpQuery::default()),
+            Bytes::from_static(br#"{"jsonrpc":"2.0","id":1,"method":"ping"}"#),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::NOT_ACCEPTABLE);
     }
 
     #[tokio::test]

@@ -2,56 +2,14 @@
 
 use serde_json::Value;
 
-use icm_core::{
-    is_preference_topic, keyword_matches, project_matches, topic_matches, Embedder, Memoir,
-    MemoirStore, Memory,
-};
+use icm_core::{Memoir, MemoirStore, Memory};
 use icm_store::Store;
 
+#[allow(unused_imports)]
+pub use crate::memory::{
+    AutoConsolidate, AUTO_CONSOLIDATE_THRESHOLD, MAX_CONTENT_LEN, MAX_TOPIC_LEN,
+};
 use crate::protocol::ToolResult;
-
-/// Historical default threshold for auto-consolidation. The live value comes
-/// from [`AutoConsolidate`] (issue #318); this constant is only the fallback
-/// for callers that don't pass a policy.
-pub const AUTO_CONSOLIDATE_THRESHOLD: usize = 10;
-
-/// Auto-consolidation policy for the MCP store path (issue #318).
-///
-/// Previously the MCP `icm_memory_store` handler consolidated a topic past a
-/// hardcoded 10 entries **unconditionally**, ignoring `[memory]
-/// auto_consolidate_enabled` / `auto_consolidate_threshold` — so an explicit
-/// `enabled = false` still destructively rolled up (and deleted) a topic's
-/// memories. `icm serve` now threads the loaded config through as one of
-/// these, and the handler honors it.
-#[derive(Clone, Copy, Debug)]
-pub struct AutoConsolidate {
-    pub enabled: bool,
-    pub threshold: usize,
-}
-
-impl Default for AutoConsolidate {
-    /// The historical always-on behavior (threshold 10). Used only by callers
-    /// that don't supply a policy — e.g. tests via [`call_tool`]. The
-    /// `icm serve` path passes the user's real config through
-    /// [`call_tool_with_config`] instead.
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            threshold: AUTO_CONSOLIDATE_THRESHOLD,
-        }
-    }
-}
-
-/// Maximum allowed UTF-8 byte length for topic names. Must stay <= the
-/// store layer's `MAX_TOPIC_BYTES` so the MCP-level rejection happens
-/// *before* the store's lower-level validation does.
-pub const MAX_TOPIC_LEN: usize = 255;
-
-/// Maximum allowed length for content/summary text. Aligned with the
-/// store layer's `MAX_SUMMARY_BYTES` (64 KB). Letting MCP accept
-/// larger inputs only to have the store reject them would be
-/// confusing — fail fast at the API surface.
-pub const MAX_CONTENT_LEN: usize = 64 * 1024;
 
 /// `icm_feedback_record`'s context/predicted/corrected/reason had no length
 /// cap at all, unlike icm_memory_store's MAX_CONTENT_LEN (audit finding).
@@ -69,37 +27,6 @@ pub fn parse_keywords(args: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Try to auto-consolidate a topic if the policy is enabled and the topic
-/// exceeds the configured threshold (issue #318). Returns a human-readable
-/// message if consolidation happened, or an empty string (including when the
-/// policy is disabled — a no-op).
-///
-/// Routes through `auto_consolidate_with_embedder` so the consolidated
-/// memory is embedded inline (closes audit M2/AC2: previously the
-/// rolled-up memory had `embedding = None` and was invisible to hybrid
-/// recall until a manual `icm embed` rebuilt it).
-pub fn try_auto_consolidate(
-    store: &Store,
-    embedder: Option<&dyn Embedder>,
-    topic: &str,
-    auto: AutoConsolidate,
-) -> String {
-    if !auto.enabled {
-        return String::new();
-    }
-    match store.auto_consolidate_with_embedder(topic, auto.threshold, embedder) {
-        Ok(true) => format!(
-            "Auto-consolidated topic '{topic}' (exceeded {} entries).",
-            auto.threshold
-        ),
-        Ok(false) => String::new(),
-        Err(e) => {
-            tracing::warn!("auto-consolidation failed for topic '{topic}': {e}");
-            String::new()
-        }
-    }
-}
-
 pub fn get_str<'a>(args: &'a Value, key: &str) -> Option<&'a str> {
     args.get(key).and_then(|v| v.as_str())
 }
@@ -108,25 +35,9 @@ pub fn get_i64(args: &Value, key: &str, default: i64) -> i64 {
     args.get(key).and_then(|v| v.as_i64()).unwrap_or(default)
 }
 
-/// Apply the shared project/topic/keyword scope used by every recall path.
 /// Flatten untrusted text before embedding it into line-oriented output.
 pub fn flatten_untrusted_text(value: &str) -> String {
     value.replace(['\n', '\r'], " ")
-}
-
-pub fn matches_memory_filters(
-    memory: &Memory,
-    project: Option<&str>,
-    topic: Option<&str>,
-    keyword: Option<&str>,
-) -> bool {
-    if let Some(project) = project {
-        if !is_preference_topic(&memory.topic) && !project_matches(&memory.topic, Some(project)) {
-            return false;
-        }
-    }
-    topic.is_none_or(|value| topic_matches(&memory.topic, value))
-        && keyword.is_none_or(|value| keyword_matches(&memory.keywords, value))
 }
 
 pub fn resolve_memoir(store: &Store, name: &str) -> Result<Memoir, ToolResult> {

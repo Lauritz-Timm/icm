@@ -67,7 +67,10 @@ pub fn call_tool_with_config(
         args,
         crate::catalog::InputValidation::Legacy2024Unchecked,
     ) {
-        DispatchResult::ToolResult(result) => result,
+        DispatchResult::ToolResult(mut result) => {
+            result.select_projection(false);
+            result
+        }
         DispatchResult::UnknownTool => ToolResult::error(format!("unknown tool: {name}")),
         DispatchResult::InvalidInput(_) => {
             unreachable!("unchecked legacy compatibility dispatch cannot reject typed inputs")

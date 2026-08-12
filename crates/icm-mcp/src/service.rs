@@ -682,7 +682,10 @@ impl<'a> McpService<'a> {
             .catalog
             .dispatch(&context, name, &arguments, validation)
         {
-            DispatchResult::ToolResult(result) => result,
+            DispatchResult::ToolResult(mut result) => {
+                result.select_projection(revision != ProtocolRevision::V2024_11_05);
+                result
+            }
             DispatchResult::UnknownTool if revision == ProtocolRevision::V2024_11_05 => {
                 crate::protocol::ToolResult::error(format!("unknown tool: {name}"))
             }
@@ -3060,9 +3063,9 @@ mod tests {
             .unwrap()
             .result
             .unwrap();
-        let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("from client"));
-        assert!(!text.contains("from other"));
+        let memories = result["structuredContent"]["memories"].as_array().unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0]["summary"], "shared marker from client");
     }
 
     #[test]
@@ -3168,6 +3171,60 @@ mod tests {
             modern_result["_meta"][MODERN_SERVER_INFO_KEY]["name"],
             SERVER_NAME
         );
+    }
+
+    #[test]
+    fn typed_outputs_follow_the_negotiated_projection() {
+        let store = Store::in_memory().unwrap();
+        let service = service(&store);
+
+        for revision in [
+            ProtocolRevision::V2024_11_05,
+            ProtocolRevision::V2025_06_18,
+            ProtocolRevision::V2025_11_25,
+        ] {
+            let mut state = initialized_state_for_revision(&service, revision);
+            let result = service
+                .handle(
+                    &mut state,
+                    request(json!({
+                        "jsonrpc":"2.0","id":2,"method":"tools/call",
+                        "params":{"name":"icm_memory_stats","arguments":{}}
+                    })),
+                )
+                .unwrap()
+                .result
+                .unwrap();
+            if revision == ProtocolRevision::V2024_11_05 {
+                assert!(result["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Memories: 0\nTopics: 0\n"));
+                assert!(result.get("structuredContent").is_none());
+            } else {
+                assert_eq!(result["content"][0]["text"], "Returned memory statistics.");
+                assert_eq!(result["structuredContent"]["totalMemories"], 0);
+            }
+        }
+
+        let mut state = ConnectionState::default();
+        let result = service
+            .handle(
+                &mut state,
+                request(json!({
+                    "jsonrpc":"2.0","id":3,"method":"tools/call",
+                    "params":{
+                        "name":"icm_memory_stats","arguments":{},
+                        "_meta":modern_metadata()
+                    }
+                })),
+            )
+            .unwrap()
+            .result
+            .unwrap();
+        assert_eq!(result["content"][0]["text"], "Returned memory statistics.");
+        assert_eq!(result["structuredContent"]["totalMemories"], 0);
+        assert_eq!(result["resultType"], "complete");
     }
 
     #[test]
@@ -3349,13 +3406,19 @@ mod tests {
             .unwrap();
         let accepted_result = accepted.result.unwrap();
         assert_ne!(accepted_result["isError"], true);
+        assert_eq!(accepted_result["content"][0]["text"], "Found 30 memories.");
         assert_eq!(
-            accepted_result["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .matches("revision limit probe")
-                .count(),
-            30
+            accepted_result["structuredContent"]["memories"]
+                .as_array()
+                .map(Vec::len),
+            Some(30)
+        );
+        let first = &accepted_result["structuredContent"]["memories"][0];
+        let stored = store.get(first["id"].as_str().unwrap()).unwrap().unwrap();
+        assert_eq!(first["accessCount"], stored.access_count);
+        assert_eq!(
+            first["lastAccessed"],
+            serde_json::to_value(stored.last_accessed).unwrap()
         );
 
         for (id, limit) in [(8, 0), (9, 101)] {

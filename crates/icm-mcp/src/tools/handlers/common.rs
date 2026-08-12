@@ -2,7 +2,10 @@
 
 use serde_json::Value;
 
-use icm_core::{Embedder, Memoir, MemoirStore, Memory};
+use icm_core::{
+    is_preference_topic, keyword_matches, project_matches, topic_matches, Embedder, Memoir,
+    MemoirStore, Memory,
+};
 use icm_store::Store;
 
 use crate::protocol::ToolResult;
@@ -105,6 +108,27 @@ pub fn get_i64(args: &Value, key: &str, default: i64) -> i64 {
     args.get(key).and_then(|v| v.as_i64()).unwrap_or(default)
 }
 
+/// Apply the shared project/topic/keyword scope used by every recall path.
+/// Flatten untrusted text before embedding it into line-oriented output.
+pub fn flatten_untrusted_text(value: &str) -> String {
+    value.replace(['\n', '\r'], " ")
+}
+
+pub fn matches_memory_filters(
+    memory: &Memory,
+    project: Option<&str>,
+    topic: Option<&str>,
+    keyword: Option<&str>,
+) -> bool {
+    if let Some(project) = project {
+        if !is_preference_topic(&memory.topic) && !project_matches(&memory.topic, Some(project)) {
+            return false;
+        }
+    }
+    topic.is_none_or(|value| topic_matches(&memory.topic, value))
+        && keyword.is_none_or(|value| keyword_matches(&memory.keywords, value))
+}
+
 pub fn resolve_memoir(store: &Store, name: &str) -> Result<Memoir, ToolResult> {
     store
         .get_memoir_by_name(name)
@@ -120,15 +144,18 @@ pub fn format_memory_output(memories: &[(Memory, f32)], compact: bool) -> String
     // delimiter indistinguishable from a real entry, or (compact mode) a
     // fake `[topic] ...` line. `keywords` has no validation at all. Flatten
     // both, same fix already applied to recall_context/render_detail.
-    let flatten = |s: &str| s.replace(['\n', '\r'], " ");
     let mut output = String::new();
     if compact {
         for (mem, _) in memories {
-            output.push_str(&format!("[{}] {}\n", mem.topic, flatten(&mem.summary)));
+            output.push_str(&format!(
+                "[{}] {}\n",
+                mem.topic,
+                flatten_untrusted_text(&mem.summary)
+            ));
         }
     } else {
         for (mem, score) in memories {
-            let summary = flatten(&mem.summary);
+            let summary = flatten_untrusted_text(&mem.summary);
             if *score >= 0.0 {
                 output.push_str(&format!(
                     "--- {} [score: {:.3}] ---\n  topic: {}\n  importance: {}\n  weight: {:.3}\n  summary: {}\n",
@@ -141,8 +168,11 @@ pub fn format_memory_output(memories: &[(Memory, f32)], compact: bool) -> String
                 ));
             }
             if !mem.keywords.is_empty() {
-                let flattened_keywords: Vec<String> =
-                    mem.keywords.iter().map(|k| flatten(k)).collect();
+                let flattened_keywords: Vec<String> = mem
+                    .keywords
+                    .iter()
+                    .map(|k| flatten_untrusted_text(k))
+                    .collect();
                 output.push_str(&format!("  keywords: {}\n", flattened_keywords.join(", ")));
             }
             if let Some(ref raw) = mem.raw_excerpt {
@@ -150,15 +180,11 @@ pub fn format_memory_output(memories: &[(Memory, f32)], compact: bool) -> String
                 // full for every hit floods the client LLM's context (audit
                 // finding). Cap the recall view — the full excerpt stays in
                 // the store.
-                const MAX_RAW_IN_RECALL: usize = 2048;
-                if raw.len() > MAX_RAW_IN_RECALL {
-                    let mut cut = MAX_RAW_IN_RECALL;
-                    while !raw.is_char_boundary(cut) {
-                        cut -= 1;
-                    }
+                let (excerpt, truncated) = crate::outputs::truncate_recall_raw(raw);
+                if truncated {
                     output.push_str(&format!(
                         "  raw: {}… [truncated, {} bytes total]\n",
-                        &raw[..cut],
+                        excerpt,
                         raw.len()
                     ));
                 } else {

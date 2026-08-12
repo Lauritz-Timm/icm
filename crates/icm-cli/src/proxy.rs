@@ -1,7 +1,7 @@
 //! Line-framed stdio MCP bridge to a warm loopback HTTP service.
 
 use std::fs::File;
-use std::io::{self, BufRead, Read, Write};
+use std::io::{self, Read, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::time::Duration;

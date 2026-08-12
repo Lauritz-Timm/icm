@@ -9,7 +9,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use base64::engine::{general_purpose::STANDARD as BASE64, Engine as _};
 use clap::Args;
-use icm_mcp::protocol::JsonRpcResponse;
+use icm_mcp::{protocol::JsonRpcResponse, server::read_capped_line_with_limit};
 use serde_json::Value;
 
 use crate::mcp_http::{encode_working_directory, WORKING_DIRECTORY_HEADER};
@@ -101,7 +101,9 @@ pub fn run(args: &ProxyArgs) -> Result<()> {
     let mut buffer = Vec::new();
 
     let result: Result<()> = (|| {
-        while let Some(within_limit) = read_capped_line(&mut reader, &mut buffer)? {
+        while let Some(within_limit) =
+            read_capped_line_with_limit(&mut reader, &mut buffer, MAX_REQUEST_BYTES)?
+        {
             if !within_limit {
                 write_error(
                     &mut writer,
@@ -691,28 +693,6 @@ fn write_body(writer: &mut impl Write, body: &[u8]) -> Result<()> {
     }
     writer.flush()?;
     Ok(())
-}
-
-fn read_capped_line(reader: &mut impl BufRead, buffer: &mut Vec<u8>) -> io::Result<Option<bool>> {
-    buffer.clear();
-    let read = reader
-        .take(MAX_REQUEST_BYTES as u64 + 1)
-        .read_until(b'\n', buffer)?;
-    if read == 0 {
-        return Ok(None);
-    }
-    if buffer.last() != Some(&b'\n') && read == MAX_REQUEST_BYTES + 1 {
-        let mut scratch = Vec::with_capacity(64 * 1024);
-        loop {
-            scratch.clear();
-            let drained = reader.take(1024 * 1024).read_until(b'\n', &mut scratch)?;
-            if drained == 0 || scratch.last() == Some(&b'\n') {
-                break;
-            }
-        }
-        return Ok(Some(false));
-    }
-    Ok(Some(true))
 }
 
 #[cfg(test)]

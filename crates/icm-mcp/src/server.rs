@@ -15,15 +15,24 @@ use crate::tools::AutoConsolidate;
 /// before the complete caller-controlled frame can be allocated.
 pub const MAX_LINE_LEN: usize = 10 * 1024 * 1024;
 
-fn read_capped_line(reader: &mut impl BufRead, buffer: &mut Vec<u8>) -> io::Result<Option<bool>> {
+/// Read one newline-delimited frame while capping caller-controlled allocation.
+///
+/// The complete oversized frame is drained before returning so the next call
+/// starts at a frame boundary. Transports with a smaller protocol-specific cap
+/// (for example the HTTP proxy) can reuse this framing primitive.
+pub fn read_capped_line_with_limit(
+    reader: &mut impl BufRead,
+    buffer: &mut Vec<u8>,
+    max_line_len: usize,
+) -> io::Result<Option<bool>> {
     buffer.clear();
     let bytes_read = reader
-        .take(MAX_LINE_LEN as u64 + 1)
+        .take(max_line_len as u64 + 1)
         .read_until(b'\n', buffer)?;
     if bytes_read == 0 {
         return Ok(None);
     }
-    if buffer.last() != Some(&b'\n') && bytes_read == MAX_LINE_LEN + 1 {
+    if buffer.last() != Some(&b'\n') && bytes_read == max_line_len + 1 {
         let mut scratch = Vec::with_capacity(64 * 1024);
         loop {
             scratch.clear();
@@ -35,6 +44,10 @@ fn read_capped_line(reader: &mut impl BufRead, buffer: &mut Vec<u8>) -> io::Resu
         return Ok(Some(false));
     }
     Ok(Some(true))
+}
+
+fn read_capped_line(reader: &mut impl BufRead, buffer: &mut Vec<u8>) -> io::Result<Option<bool>> {
+    read_capped_line_with_limit(reader, buffer, MAX_LINE_LEN)
 }
 
 /// Run the MCP server on stdio until stdin closes.

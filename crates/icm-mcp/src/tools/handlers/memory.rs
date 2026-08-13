@@ -5,18 +5,18 @@ use serde_json::Value;
 
 use icm_core::{
     add_backrefs, auto_link_memory, build_wake_up, find_similar_memory, format_local,
-    is_preference_topic, keyword_matches, project_matches, topic_matches, AutoLinkOptions,
-    Embedder, Memory, MemoryStore, WakeUpFormat, WakeUpOptions, DEDUP_SIMILARITY_THRESHOLD,
-    MSG_NO_MEMORIES,
+    AutoLinkOptions, Embedder, Memory, MemoryStore, WakeUpFormat, WakeUpOptions,
+    DEDUP_SIMILARITY_THRESHOLD, MSG_NO_MEMORIES,
 };
 use icm_store::Store;
 
 use crate::catalog::ToolContext;
+use crate::outputs::{MemoryRecallOutput, MemoryStatsOutput, MemoryTopicsOutput, SearchMode};
 use crate::protocol::ToolResult;
 
 use super::common::{
-    format_memory_output, get_i64, get_str, parse_keywords, resolve_memoir, try_auto_consolidate,
-    AutoConsolidate, MAX_CONTENT_LEN, MAX_TOPIC_LEN,
+    format_memory_output, get_i64, get_str, matches_memory_filters, parse_keywords, resolve_memoir,
+    try_auto_consolidate, AutoConsolidate, MAX_CONTENT_LEN, MAX_TOPIC_LEN,
 };
 
 pub(in crate::tools) fn tool_wake_up(store: &Store, args: &Value) -> ToolResult {
@@ -250,6 +250,43 @@ pub(in crate::tools) fn tool_store(
     }
 }
 
+fn recall_result(
+    query: &str,
+    project: Option<&str>,
+    search_mode: SearchMode,
+    memories: &[(Memory, f32)],
+    compact: bool,
+    include_scores: bool,
+) -> ToolResult {
+    let legacy = if memories.is_empty() {
+        MSG_NO_MEMORIES.into()
+    } else {
+        format_memory_output(memories, compact)
+    };
+    let output = MemoryRecallOutput::new(query, project, search_mode, memories, include_scores);
+    ToolResult::structured(legacy, format!("Found {} memories.", output.len()), &output)
+}
+
+fn update_recall_access(store: &Store, memories: &mut [(Memory, f32)]) {
+    let refreshed = {
+        let ids: Vec<&str> = memories
+            .iter()
+            .map(|(memory, _)| memory.id.as_str())
+            .collect();
+        match store.batch_update_access(&ids) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => store.get_many(&ids),
+        }
+    };
+    if let Ok(mut refreshed) = refreshed {
+        for (memory, _) in memories {
+            if let Some(current) = refreshed.remove(&memory.id) {
+                *memory = current;
+            }
+        }
+    }
+}
+
 pub(in crate::tools) fn tool_recall(context: &ToolContext<'_>, args: &Value) -> ToolResult {
     let store = context.store;
     let embedder = context.embedder;
@@ -285,12 +322,8 @@ pub(in crate::tools) fn tool_recall(context: &ToolContext<'_>, args: &Value) -> 
         Some(p) => Some(p.to_string()),
         None => cwd_project,
     };
-    let project_filter = |m: &Memory| -> bool {
-        match project.as_deref() {
-            None => true,
-            Some(p) => is_preference_topic(&m.topic) || project_matches(&m.topic, Some(p)),
-        }
-    };
+    let memory_filter =
+        |memory: &Memory| matches_memory_filters(memory, project.as_deref(), topic, keyword);
 
     // Audit finding: filters were applied AFTER the store already truncated
     // to `limit` — if the top-`limit` global hits all belonged to other
@@ -312,13 +345,7 @@ pub(in crate::tools) fn tool_recall(context: &ToolContext<'_>, args: &Value) -> 
         if let Ok(query_emb) = emb.embed_query(query) {
             if let Ok(results) = store.search_hybrid(query, &query_emb, query_limit) {
                 let mut scored_results = results;
-                scored_results.retain(|(m, _)| project_filter(m));
-                if let Some(t) = topic {
-                    scored_results.retain(|(m, _)| topic_matches(&m.topic, t));
-                }
-                if let Some(kw) = keyword {
-                    scored_results.retain(|(m, _)| keyword_matches(&m.keywords, kw));
-                }
+                scored_results.retain(|(memory, _)| memory_filter(memory));
 
                 // Graph-aware expansion: follow `related_ids` one hop from
                 // each primary hit and fold neighbors into the result set.
@@ -334,35 +361,33 @@ pub(in crate::tools) fn tool_recall(context: &ToolContext<'_>, args: &Value) -> 
                 let mut expanded = store
                     .expand_with_neighbors(&scored_results, max_neighbors, 0.5, query_limit)
                     .unwrap_or(scored_results);
-                expanded.retain(|(m, _)| project_filter(m));
-                if let Some(t) = topic {
-                    expanded.retain(|(m, _)| topic_matches(&m.topic, t));
-                }
-                if let Some(kw) = keyword {
-                    expanded.retain(|(m, _)| keyword_matches(&m.keywords, kw));
-                }
+                expanded.retain(|(memory, _)| memory_filter(memory));
                 expanded.truncate(limit);
 
                 // Batch update access counts (includes expanded neighbors)
-                let ids: Vec<&str> = expanded.iter().map(|(m, _)| m.id.as_str()).collect();
-                let _ = store.batch_update_access(&ids);
+                update_recall_access(store, &mut expanded);
 
-                if expanded.is_empty() {
-                    return ToolResult::text(MSG_NO_MEMORIES.into());
-                }
-
-                return ToolResult::text(format_memory_output(&expanded, compact));
+                return recall_result(
+                    query,
+                    project.as_deref(),
+                    SearchMode::Hybrid,
+                    &expanded,
+                    compact,
+                    true,
+                );
             }
         }
     }
 
     // Fallback: FTS then keywords
+    let mut search_mode = SearchMode::FullText;
     let mut results = match store.search_fts(query, query_limit) {
         Ok(r) => r,
         Err(e) => return ToolResult::error(format!("search error: {e}")),
     };
 
     if results.is_empty() {
+        search_mode = SearchMode::Keyword;
         let keywords: Vec<&str> = query.split_whitespace().collect();
         results = match store.search_by_keywords(&keywords, query_limit) {
             Ok(r) => r,
@@ -370,13 +395,7 @@ pub(in crate::tools) fn tool_recall(context: &ToolContext<'_>, args: &Value) -> 
         };
     }
 
-    results.retain(|m| project_filter(m));
-    if let Some(t) = topic {
-        results.retain(|m| topic_matches(&m.topic, t));
-    }
-    if let Some(kw) = keyword {
-        results.retain(|m| keyword_matches(&m.keywords, kw));
-    }
+    results.retain(|memory| memory_filter(memory));
     results.truncate(limit);
 
     // Convert to scored format with a sentinel score of 1.0 (FTS fallback
@@ -391,26 +410,22 @@ pub(in crate::tools) fn tool_recall(context: &ToolContext<'_>, args: &Value) -> 
     let mut expanded = store
         .expand_with_neighbors(&scored, max_neighbors, 0.5, limit)
         .unwrap_or(scored);
-    expanded.retain(|(m, _)| project_filter(m));
-    if let Some(t) = topic {
-        expanded.retain(|(m, _)| topic_matches(&m.topic, t));
-    }
-    if let Some(kw) = keyword {
-        expanded.retain(|(m, _)| keyword_matches(&m.keywords, kw));
-    }
+    expanded.retain(|(memory, _)| memory_filter(memory));
 
     // Batch update access counts (includes expanded neighbors)
-    let ids: Vec<&str> = expanded.iter().map(|(m, _)| m.id.as_str()).collect();
-    let _ = store.batch_update_access(&ids);
-
-    if expanded.is_empty() {
-        return ToolResult::text(MSG_NO_MEMORIES.into());
-    }
+    update_recall_access(store, &mut expanded);
 
     // FTS-path results have synthetic scores — reset to -1.0 for display
     // so we don't claim a hybrid-search confidence we didn't compute.
     let for_display: Vec<(Memory, f32)> = expanded.into_iter().map(|(m, _)| (m, -1.0)).collect();
-    ToolResult::text(format_memory_output(&for_display, compact))
+    recall_result(
+        query,
+        project.as_deref(),
+        search_mode,
+        &for_display,
+        compact,
+        false,
+    )
 }
 
 pub(in crate::tools) fn tool_forget(store: &Store, args: &Value) -> ToolResult {
@@ -529,8 +544,13 @@ pub(in crate::tools) fn tool_consolidate(
 pub(in crate::tools) fn tool_list_topics(store: &Store) -> ToolResult {
     match store.list_topics() {
         Ok(topics) => {
+            let structured = MemoryTopicsOutput::new(&topics);
             if topics.is_empty() {
-                return ToolResult::text("No topics yet.".into());
+                return ToolResult::structured(
+                    "No topics yet.".into(),
+                    "Found 0 topics.".into(),
+                    &structured,
+                );
             }
 
             // Group topics by scope prefix (before ':')
@@ -565,7 +585,11 @@ pub(in crate::tools) fn tool_list_topics(store: &Store) -> ToolResult {
                 }
             }
 
-            ToolResult::text(output)
+            ToolResult::structured(
+                output,
+                format!("Found {} topics.", structured.len()),
+                &structured,
+            )
         }
         Err(e) => ToolResult::error(format!("failed to list topics: {e}")),
     }
@@ -574,6 +598,7 @@ pub(in crate::tools) fn tool_list_topics(store: &Store) -> ToolResult {
 pub(in crate::tools) fn tool_stats(store: &Store) -> ToolResult {
     match store.stats() {
         Ok(stats) => {
+            let structured = MemoryStatsOutput::from(stats.clone());
             let mut output = format!(
                 "Memories: {}\nTopics: {}\nAvg weight: {:.3}\n",
                 stats.total_memories, stats.total_topics, stats.avg_weight
@@ -590,7 +615,7 @@ pub(in crate::tools) fn tool_stats(store: &Store) -> ToolResult {
                     format_local(&newest, "%Y-%m-%d %H:%M")
                 ));
             }
-            ToolResult::text(output)
+            ToolResult::structured(output, "Returned memory statistics.".into(), &structured)
         }
         Err(e) => ToolResult::error(format!("failed to get stats: {e}")),
     }

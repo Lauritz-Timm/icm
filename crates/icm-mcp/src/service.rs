@@ -3,8 +3,9 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 
-use icm_core::Embedder;
+use icm_core::{project::project_from_path, Embedder, IcmError, IcmResult, Memory};
 use icm_store::Store;
+use serde::Serialize;
 use serde_json::{json, Map, Value};
 
 use crate::catalog::{DispatchResult, InputValidation, ToolCatalog, ToolContext};
@@ -23,6 +24,11 @@ const MODERN_SERVER_INFO_KEY: &str = "io.modelcontextprotocol/serverInfo";
 const MODERN_LOG_LEVEL_KEY: &str = "io.modelcontextprotocol/logLevel";
 const MODERN_SUBSCRIPTION_ID_KEY: &str = "io.modelcontextprotocol/subscriptionId";
 const MAX_STORED_LIFECYCLE_METHOD_BYTES: usize = 256;
+const ACTIVE_PROJECT_CONTEXT_URI: &str = "icm://active-project/context";
+const ACTIVE_PROJECT_CONTEXT_MIME_TYPE: &str = "application/json";
+const RESOURCE_ROW_LIMIT: usize = 64;
+const RESOURCE_FIELD_BYTES: usize = 512;
+const RESOURCE_MAX_BYTES: usize = 2048;
 
 pub const ICM_INSTRUCTIONS: &str = "\
 Use ICM (Infinite Context Memory) proactively to maintain long-term memory across sessions.\n\
@@ -80,12 +86,28 @@ impl Default for ConnectionState {
     }
 }
 
+impl ConnectionState {
+    /// Start a stateless HTTP request in the frozen 2024 compatibility era.
+    /// Stdio still begins uninitialized; only transports that already carry
+    /// the protocol revision out-of-band should use this constructor.
+    pub fn legacy_2024_ready() -> Self {
+        Self {
+            phase: ConnectionPhase::LegacyReady {
+                revision: ProtocolRevision::V2024_11_05,
+                initialized_seen: false,
+            },
+            calls_since_store: 0,
+        }
+    }
+}
+
 pub struct McpService<'a> {
     store: &'a Store,
     embedder: Option<&'a dyn Embedder>,
     compact: bool,
     auto_consolidate: AutoConsolidate,
     working_directory: PathBuf,
+    active_project: Option<String>,
     catalog: ToolCatalog,
 }
 
@@ -113,12 +135,17 @@ impl<'a> McpService<'a> {
         auto_consolidate: AutoConsolidate,
         working_directory: PathBuf,
     ) -> Self {
+        let active_project = working_directory
+            .to_str()
+            .and_then(project_from_path)
+            .filter(|project| valid_resource_project(project));
         Self {
             store,
             embedder,
             compact,
             auto_consolidate,
             working_directory,
+            active_project,
             catalog: tools::build_catalog(embedder.is_some()),
         }
     }
@@ -448,48 +475,130 @@ impl<'a> McpService<'a> {
             "tools/list" => self.list_tools(id, revision, message),
             "tools/call" => self.call_tool(state, id, revision, message),
             "resources/list" if revision != ProtocolRevision::V2024_11_05 => {
-                let result = if revision == ProtocolRevision::V2026_07_28 {
-                    project_result(
-                        revision,
-                        json!({ "resources": [] }),
-                        Some((3_600_000, "private")),
-                    )
-                } else {
-                    json!({
-                        "resources": [],
-                        "_meta": { "ttlMs": 0, "cacheScope": "private" }
-                    })
-                };
-                JsonRpcResponse::ok(id, result)
+                self.list_resources(id, revision, message)
             }
             "resources/read" if revision != ProtocolRevision::V2024_11_05 => {
-                let uri = message
-                    .params
-                    .as_ref()
-                    .and_then(Value::as_object)
-                    .and_then(|params| params.get("uri"))
-                    .and_then(Value::as_str);
-                let Some(uri) = uri else {
-                    return JsonRpcResponse::err(
-                        id,
-                        -32602,
-                        "resources/read.uri must be a string".into(),
-                    );
-                };
-                let code = if revision == ProtocolRevision::V2026_07_28 {
-                    -32602
-                } else {
-                    -32002
-                };
-                JsonRpcResponse::err_with_data(
-                    id,
-                    code,
-                    "resource not found".into(),
-                    Some(json!({ "uri": uri })),
-                )
+                self.read_resource(id, revision, message)
             }
             other => JsonRpcResponse::method_not_found(id, other),
         }
+    }
+
+    fn list_resources(
+        &self,
+        id: Value,
+        revision: ProtocolRevision,
+        message: &JsonRpcMessage,
+    ) -> JsonRpcResponse {
+        let cursor = message
+            .params
+            .as_ref()
+            .and_then(Value::as_object)
+            .and_then(|params| params.get("cursor"));
+        if cursor.is_some_and(|cursor| !cursor.is_null() && cursor.as_str() != Some("")) {
+            return JsonRpcResponse::err(
+                id,
+                -32602,
+                "resources/list cursor is not supported".into(),
+            );
+        }
+
+        let resources = self
+            .active_project
+            .as_ref()
+            .map(|_| {
+                json!({
+                    "uri": ACTIVE_PROJECT_CONTEXT_URI,
+                    "name": "active-project-context",
+                    "title": "Active Project Context",
+                    "description": "Stored context for the project inferred from the MCP server working directory.",
+                    "mimeType": ACTIVE_PROJECT_CONTEXT_MIME_TYPE,
+                    "annotations": { "audience": ["assistant"], "priority": 1.0 }
+                })
+            })
+            .into_iter()
+            .collect::<Vec<_>>();
+        let result = if revision == ProtocolRevision::V2026_07_28 {
+            project_result(
+                revision,
+                json!({ "resources": resources }),
+                Some((3_600_000, "private")),
+            )
+        } else {
+            json!({
+                "resources": resources,
+                "_meta": { "ttlMs": 0, "cacheScope": "private" }
+            })
+        };
+        JsonRpcResponse::ok(id, result)
+    }
+
+    fn read_resource(
+        &self,
+        id: Value,
+        revision: ProtocolRevision,
+        message: &JsonRpcMessage,
+    ) -> JsonRpcResponse {
+        let Some(params) = message.params.as_ref().and_then(Value::as_object) else {
+            return JsonRpcResponse::err(
+                id,
+                -32602,
+                "resources/read params must be an object".into(),
+            );
+        };
+        if params
+            .keys()
+            .any(|key| !matches!(key.as_str(), "uri" | "_meta"))
+        {
+            return JsonRpcResponse::err(
+                id,
+                -32602,
+                "resources/read accepts only uri and _meta".into(),
+            );
+        }
+        let Some(uri) = params.get("uri").and_then(Value::as_str) else {
+            return JsonRpcResponse::err(id, -32602, "resources/read.uri must be a string".into());
+        };
+        let Some(project) = self
+            .active_project
+            .as_deref()
+            .filter(|_| uri == ACTIVE_PROJECT_CONTEXT_URI)
+        else {
+            let code = if revision == ProtocolRevision::V2026_07_28 {
+                -32602
+            } else {
+                -32002
+            };
+            return JsonRpcResponse::err_with_data(
+                id,
+                code,
+                "resource not found".into(),
+                Some(json!({ "uri": uri })),
+            );
+        };
+
+        let text = match active_project_context(self.store, project) {
+            Ok(text) => text,
+            Err(error) => {
+                tracing::warn!(%error, "failed to read active-project MCP resource");
+                return JsonRpcResponse::err(id, -32603, "failed to read resource".into());
+            }
+        };
+        let value = json!({
+            "contents": [{
+                "uri": ACTIVE_PROJECT_CONTEXT_URI,
+                "mimeType": ACTIVE_PROJECT_CONTEXT_MIME_TYPE,
+                "text": text,
+            }]
+        });
+        let result = if revision == ProtocolRevision::V2026_07_28 {
+            project_result(revision, value, Some((0, "private")))
+        } else {
+            let mut value = value;
+            value["_meta"] = json!({ "ttlMs": 0, "cacheScope": "private" });
+            value
+        };
+        JsonRpcResponse::ok(id, result)
     }
 
     fn list_tools(
@@ -573,7 +682,10 @@ impl<'a> McpService<'a> {
             .catalog
             .dispatch(&context, name, &arguments, validation)
         {
-            DispatchResult::ToolResult(result) => result,
+            DispatchResult::ToolResult(mut result) => {
+                result.select_projection(revision != ProtocolRevision::V2024_11_05);
+                result
+            }
             DispatchResult::UnknownTool if revision == ProtocolRevision::V2024_11_05 => {
                 crate::protocol::ToolResult::error(format!("unknown tool: {name}"))
             }
@@ -744,15 +856,7 @@ fn validate_modern_request(
         ));
     };
     if requested != ProtocolRevision::V2026_07_28.as_str() {
-        return Err(Box::new(JsonRpcResponse::err_with_data(
-            id,
-            -32022,
-            format!("unsupported protocol version: {requested}"),
-            Some(json!({
-                "supported": SUPPORTED_PROTOCOL_VERSIONS,
-                "requested": requested,
-            })),
-        )));
+        return Err(Box::new(unsupported_protocol_version_error(id, requested)));
     }
 
     let Some(capabilities) = metadata
@@ -776,6 +880,19 @@ fn validate_modern_request(
         ));
     }
     validate_optional_metadata_values(&id, metadata)
+}
+
+/// Build the protocol-defined error shared by MCP services and transports.
+pub fn unsupported_protocol_version_error(id: Value, requested: &str) -> JsonRpcResponse {
+    JsonRpcResponse::err_with_data(
+        id,
+        -32022,
+        format!("unsupported protocol version: {requested}"),
+        Some(json!({
+            "supported": SUPPORTED_PROTOCOL_VERSIONS,
+            "requested": requested,
+        })),
+    )
 }
 
 fn validate_modern_notification(message: &JsonRpcMessage) -> Result<(), String> {
@@ -1361,6 +1478,152 @@ fn valid_baggage_value(value: &str) -> bool {
 
 fn trim_ows(value: &str) -> &str {
     value.trim_matches(|character| matches!(character, ' ' | '\t'))
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ActiveProjectContext {
+    project: String,
+    topics: Vec<String>,
+    memories: Vec<ResourceMemory>,
+    truncated: bool,
+    truncation_reasons: Vec<&'static str>,
+    omitted_at_least: usize,
+    budget: ResourceBudget,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceMemory {
+    id: String,
+    topic: String,
+    summary: String,
+    importance: String,
+    weight: f32,
+    updated_at: String,
+    field_truncated: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResourceBudget {
+    max_portable_tokens: usize,
+    used_portable_tokens: usize,
+    algorithm: &'static str,
+}
+
+fn active_project_context(store: &Store, project: &str) -> IcmResult<String> {
+    let mut context = empty_resource_context(project);
+    let topic_refs = context
+        .topics
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    let fetched = store.get_by_topics_limited(&topic_refs, RESOURCE_ROW_LIMIT + 1)?;
+    let fetched_count = fetched.len();
+    let memories = fetched
+        .into_iter()
+        .take(RESOURCE_ROW_LIMIT)
+        .map(resource_memory)
+        .collect::<Vec<_>>();
+    let field_limited = memories.iter().any(|memory| memory.field_truncated);
+    let row_limited = fetched_count > RESOURCE_ROW_LIMIT;
+    let mut truncation_reasons = Vec::new();
+    if row_limited {
+        truncation_reasons.push("rowLimit");
+    }
+    if field_limited {
+        truncation_reasons.push("fieldLimit");
+    }
+    context.omitted_at_least = fetched_count.saturating_sub(memories.len());
+    context.truncated = !truncation_reasons.is_empty();
+    context.truncation_reasons = truncation_reasons;
+    context.memories = memories;
+
+    loop {
+        let text = serialize_resource_context(&mut context)?;
+        if text.len() <= RESOURCE_MAX_BYTES {
+            return Ok(text);
+        }
+        if !context.truncation_reasons.contains(&"tokenBudget") {
+            context.truncation_reasons.push("tokenBudget");
+        }
+        context.truncated = true;
+        if context.memories.pop().is_none() {
+            return Err(IcmError::InvalidInput(
+                "active-project resource metadata exceeds its fixed budget".into(),
+            ));
+        }
+        context.omitted_at_least = fetched_count.saturating_sub(context.memories.len());
+    }
+}
+
+fn empty_resource_context(project: &str) -> ActiveProjectContext {
+    ActiveProjectContext {
+        project: project.into(),
+        topics: vec![
+            format!("context-{project}"),
+            format!("contexte-{project}"),
+            format!("decisions-{project}"),
+        ],
+        memories: Vec::new(),
+        truncated: false,
+        truncation_reasons: Vec::new(),
+        omitted_at_least: 0,
+        budget: ResourceBudget {
+            max_portable_tokens: RESOURCE_MAX_BYTES,
+            used_portable_tokens: 0,
+            algorithm: "utf8-bytes-v1",
+        },
+    }
+}
+
+fn resource_memory(memory: Memory) -> ResourceMemory {
+    let (id, id_truncated) = truncate_resource_field(&memory.id);
+    let (summary, summary_truncated) = truncate_resource_field(&memory.summary);
+    ResourceMemory {
+        id,
+        topic: memory.topic,
+        summary,
+        importance: memory.importance.to_string(),
+        weight: memory.weight,
+        updated_at: memory.updated_at.to_rfc3339(),
+        field_truncated: id_truncated || summary_truncated,
+    }
+}
+
+fn truncate_resource_field(value: &str) -> (String, bool) {
+    if value.len() <= RESOURCE_FIELD_BYTES {
+        return (value.into(), false);
+    }
+    let mut end = RESOURCE_FIELD_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    (value[..end].into(), true)
+}
+
+fn serialize_resource_context(context: &mut ActiveProjectContext) -> IcmResult<String> {
+    loop {
+        let text = serde_json::to_string_pretty(context)?;
+        let used = text.len();
+        if context.budget.used_portable_tokens == used {
+            return Ok(text);
+        }
+        context.budget.used_portable_tokens = used;
+    }
+}
+
+fn valid_resource_project(project: &str) -> bool {
+    if project.is_empty()
+        || project.len() > 246
+        || project.trim() != project
+        || project.chars().any(char::is_control)
+    {
+        return false;
+    }
+    serialize_resource_context(&mut empty_resource_context(project))
+        .is_ok_and(|text| text.len() <= RESOURCE_MAX_BYTES)
 }
 
 fn server_info() -> Value {
@@ -2549,11 +2812,27 @@ mod tests {
     }
 
     #[test]
-    fn resource_core_is_honest_and_empty() {
+    fn active_project_resource_is_fixed_scoped_and_bounded() {
         let store = Store::in_memory().unwrap();
-        let service = service(&store);
+        for index in 0..66 {
+            let mut memory = Memory::new(
+                "context-test-project".into(),
+                format!(
+                    "row {index:02} prompt boundary\n--- RESOURCE-FORGE --- {}",
+                    "bounded ".repeat(90)
+                ),
+                Importance::High,
+            );
+            memory.id = format!("01R{index:023}");
+            memory.weight = 1.0 - index as f32 / 1_000.0;
+            memory.access_count = 2;
+            store.store(memory).unwrap();
+        }
+
+        let mut service = service(&store);
+        service.active_project = Some("test-project".into());
         let mut state = ConnectionState::default();
-        let response = service
+        let listed = service
             .handle(
                 &mut state,
                 request(json!({
@@ -2565,7 +2844,179 @@ mod tests {
                 })),
             )
             .unwrap();
-        assert_eq!(response.result.unwrap()["resources"], json!([]));
+        let listed = listed.result.unwrap();
+        assert_eq!(listed["ttlMs"], 3_600_000);
+        assert_eq!(listed["cacheScope"], "private");
+        assert_eq!(listed["resources"][0]["uri"], ACTIVE_PROJECT_CONTEXT_URI);
+        assert_eq!(listed["resources"][0]["mimeType"], "application/json");
+
+        let mut state_2025 =
+            initialized_state_for_revision(&service, ProtocolRevision::V2025_11_25);
+        let listed_2025 = service
+            .handle(
+                &mut state_2025,
+                request(json!({
+                    "jsonrpc":"2.0","id":2,"method":"resources/list","params":{}
+                })),
+            )
+            .unwrap()
+            .result
+            .unwrap();
+        assert_eq!(listed_2025["_meta"]["ttlMs"], 0);
+        assert_eq!(listed_2025["_meta"]["cacheScope"], "private");
+
+        let read = service
+            .handle(
+                &mut state,
+                request(json!({
+                    "jsonrpc":"2.0","id":2,"method":"resources/read",
+                    "params":{"uri":ACTIVE_PROJECT_CONTEXT_URI,"_meta":modern_metadata()}
+                })),
+            )
+            .unwrap()
+            .result
+            .unwrap();
+        assert_eq!(read["ttlMs"], 0);
+        assert_eq!(read["cacheScope"], "private");
+        let text = read["contents"][0]["text"].as_str().unwrap();
+        assert!(text.len() <= RESOURCE_MAX_BYTES);
+        assert!(text.contains("\\n--- RESOURCE-FORGE"));
+        let context: Value = serde_json::from_str(text).unwrap();
+        assert_eq!(context["project"], "test-project");
+        assert_eq!(
+            context["topics"],
+            json!([
+                "context-test-project",
+                "contexte-test-project",
+                "decisions-test-project"
+            ])
+        );
+        assert_eq!(context["budget"]["usedPortableTokens"], text.len());
+        assert_eq!(context["budget"]["algorithm"], "utf8-bytes-v1");
+        assert_eq!(context["truncated"], true);
+        for reason in ["rowLimit", "fieldLimit", "tokenBudget"] {
+            assert!(context["truncationReasons"]
+                .as_array()
+                .unwrap()
+                .contains(&json!(reason)));
+        }
+        assert!(context["memories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|memory| memory["fieldTruncated"] == true));
+        assert_eq!(
+            store
+                .get("01R00000000000000000000000")
+                .unwrap()
+                .unwrap()
+                .access_count,
+            2
+        );
+    }
+
+    #[test]
+    fn active_project_resource_is_empty_and_cross_project_isolated_in_2025() {
+        let store = Store::in_memory().unwrap();
+        let mut service = service(&store);
+        service.active_project = Some("test-project".into());
+        let mut state = initialized_state_for_revision(&service, ProtocolRevision::V2025_11_25);
+
+        let read = |service: &McpService<'_>, state: &mut ConnectionState, id| {
+            service
+                .handle(
+                    state,
+                    request(json!({
+                        "jsonrpc":"2.0","id":id,"method":"resources/read",
+                        "params":{"uri":ACTIVE_PROJECT_CONTEXT_URI}
+                    })),
+                )
+                .unwrap()
+                .result
+                .unwrap()
+        };
+        let empty = read(&service, &mut state, 2);
+        assert_eq!(empty["_meta"], json!({"ttlMs":0,"cacheScope":"private"}));
+        let context: Value =
+            serde_json::from_str(empty["contents"][0]["text"].as_str().unwrap()).unwrap();
+        assert_eq!(context["memories"], json!([]));
+        assert_eq!(context["truncated"], false);
+
+        for (topic, summary) in [
+            ("context-test-project", "included"),
+            ("context-other-project", "excluded project"),
+            ("preferences", "excluded global"),
+        ] {
+            store
+                .store(Memory::new(topic.into(), summary.into(), Importance::High))
+                .unwrap();
+        }
+        let populated = read(&service, &mut state, 3);
+        let context: Value =
+            serde_json::from_str(populated["contents"][0]["text"].as_str().unwrap()).unwrap();
+        let memories = context["memories"].as_array().unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0]["summary"], "included");
+    }
+
+    #[test]
+    fn active_project_resource_rejects_bad_uris_and_hides_internal_failures() {
+        let store = Store::in_memory().unwrap();
+        let mut service = service(&store);
+        service.active_project = Some("test-project".into());
+
+        let mut legacy = initialized_state_for_revision(&service, ProtocolRevision::V2024_11_05);
+        let unavailable = service
+            .handle(
+                &mut legacy,
+                request(json!({
+                    "jsonrpc":"2.0","id":2,"method":"resources/read",
+                    "params":{"uri":ACTIVE_PROJECT_CONTEXT_URI}
+                })),
+            )
+            .unwrap();
+        assert_eq!(unavailable.error.unwrap().code, -32601);
+
+        for (id, mut params) in [
+            (3, json!({})),
+            (4, json!({"uri":42})),
+            (
+                5,
+                json!({"uri":"icm://active-project/context?unexpected=1"}),
+            ),
+        ] {
+            params
+                .as_object_mut()
+                .unwrap()
+                .insert("_meta".into(), modern_metadata());
+            let mut modern = ConnectionState::default();
+            let rejected = service
+                .handle(
+                    &mut modern,
+                    request(json!({
+                        "jsonrpc":"2.0","id":id,"method":"resources/read",
+                        "params":params
+                    })),
+                )
+                .unwrap();
+            assert_eq!(rejected.error.unwrap().code, -32602);
+        }
+
+        service.active_project = Some("x".repeat(RESOURCE_MAX_BYTES));
+        let mut modern = ConnectionState::default();
+        let failed = service
+            .handle(
+                &mut modern,
+                request(json!({
+                    "jsonrpc":"2.0","id":6,"method":"resources/read",
+                    "params":{"uri":ACTIVE_PROJECT_CONTEXT_URI,"_meta":modern_metadata()}
+                })),
+            )
+            .unwrap();
+        let error = failed.error.unwrap();
+        assert_eq!(error.code, -32603);
+        assert_eq!(error.message, "failed to read resource");
+        assert!(error.data.is_none());
     }
 
     #[test]
@@ -2612,9 +3063,9 @@ mod tests {
             .unwrap()
             .result
             .unwrap();
-        let text = result["content"][0]["text"].as_str().unwrap();
-        assert!(text.contains("from client"));
-        assert!(!text.contains("from other"));
+        let memories = result["structuredContent"]["memories"].as_array().unwrap();
+        assert_eq!(memories.len(), 1);
+        assert_eq!(memories[0]["summary"], "shared marker from client");
     }
 
     #[test]
@@ -2720,6 +3171,60 @@ mod tests {
             modern_result["_meta"][MODERN_SERVER_INFO_KEY]["name"],
             SERVER_NAME
         );
+    }
+
+    #[test]
+    fn typed_outputs_follow_the_negotiated_projection() {
+        let store = Store::in_memory().unwrap();
+        let service = service(&store);
+
+        for revision in [
+            ProtocolRevision::V2024_11_05,
+            ProtocolRevision::V2025_06_18,
+            ProtocolRevision::V2025_11_25,
+        ] {
+            let mut state = initialized_state_for_revision(&service, revision);
+            let result = service
+                .handle(
+                    &mut state,
+                    request(json!({
+                        "jsonrpc":"2.0","id":2,"method":"tools/call",
+                        "params":{"name":"icm_memory_stats","arguments":{}}
+                    })),
+                )
+                .unwrap()
+                .result
+                .unwrap();
+            if revision == ProtocolRevision::V2024_11_05 {
+                assert!(result["content"][0]["text"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("Memories: 0\nTopics: 0\n"));
+                assert!(result.get("structuredContent").is_none());
+            } else {
+                assert_eq!(result["content"][0]["text"], "Returned memory statistics.");
+                assert_eq!(result["structuredContent"]["totalMemories"], 0);
+            }
+        }
+
+        let mut state = ConnectionState::default();
+        let result = service
+            .handle(
+                &mut state,
+                request(json!({
+                    "jsonrpc":"2.0","id":3,"method":"tools/call",
+                    "params":{
+                        "name":"icm_memory_stats","arguments":{},
+                        "_meta":modern_metadata()
+                    }
+                })),
+            )
+            .unwrap()
+            .result
+            .unwrap();
+        assert_eq!(result["content"][0]["text"], "Returned memory statistics.");
+        assert_eq!(result["structuredContent"]["totalMemories"], 0);
+        assert_eq!(result["resultType"], "complete");
     }
 
     #[test]
@@ -2901,13 +3406,19 @@ mod tests {
             .unwrap();
         let accepted_result = accepted.result.unwrap();
         assert_ne!(accepted_result["isError"], true);
+        assert_eq!(accepted_result["content"][0]["text"], "Found 30 memories.");
         assert_eq!(
-            accepted_result["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .matches("revision limit probe")
-                .count(),
-            30
+            accepted_result["structuredContent"]["memories"]
+                .as_array()
+                .map(Vec::len),
+            Some(30)
+        );
+        let first = &accepted_result["structuredContent"]["memories"][0];
+        let stored = store.get(first["id"].as_str().unwrap()).unwrap().unwrap();
+        assert_eq!(first["accessCount"], stored.access_count);
+        assert_eq!(
+            first["lastAccessed"],
+            serde_json::to_value(stored.last_accessed).unwrap()
         );
 
         for (id, limit) in [(8, 0), (9, 101)] {

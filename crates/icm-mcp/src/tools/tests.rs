@@ -513,6 +513,7 @@ fn test_stats_empty() {
     let result = call_tool(&store, None, "icm_memory_stats", &json!({}), false);
     assert!(!result.is_error);
     assert!(result.content[0].text.contains("Memories: 0"));
+    assert!(result.structured_content.is_none());
 }
 
 #[test]

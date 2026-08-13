@@ -20,7 +20,7 @@
 //!     (which the issue's manual smoke covers).
 #![cfg(all(target_os = "linux", feature = "http-api"))]
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -50,7 +50,11 @@ fn pick_port() -> u16 {
 
 fn spawn_server(db_path: &std::path::Path, extra: &[&str]) -> ServerGuard {
     let port = pick_port();
-    let addr = format!("127.0.0.1:{port}");
+    spawn_server_at(db_path, &format!("127.0.0.1:{port}"), extra)
+}
+
+fn spawn_server_at(db_path: &std::path::Path, addr: &str, extra: &[&str]) -> ServerGuard {
+    let addr = addr.to_owned();
 
     let mut cmd = Command::new(ICM);
     cmd.arg("--no-embeddings")
@@ -122,6 +126,19 @@ fn get(addr: &str, path: &str) -> ureq::Response {
         .timeout(Duration::from_secs(5))
         .call()
         .expect("GET")
+}
+
+fn spawn_proxy(dir: &std::path::Path, addr: &str) -> Child {
+    Command::new(ICM)
+        .arg("proxy")
+        .arg("--url")
+        .arg(format!("http://{addr}"))
+        .current_dir(dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn icm proxy")
 }
 
 fn temp_db() -> (tempfile::TempDir, PathBuf) {
@@ -261,6 +278,22 @@ fn bearer_token_required_when_configured() {
 }
 
 #[test]
+fn mcp_rejects_invalid_origin_before_authentication() {
+    let (_dir, db) = temp_db();
+    let server = spawn_server(&db, &["--token", "s3cr3t"]);
+
+    let response = ureq::post(&format!("http://{}/mcp", server.addr))
+        .timeout(Duration::from_secs(5))
+        .set("origin", "https://attacker.invalid")
+        .set("content-type", "application/json")
+        .send_string(r#"{"jsonrpc":"2.0","id":1,"method":"tools/list"}"#);
+    match response {
+        Err(ureq::Error::Status(code, _)) => assert_eq!(code, 403),
+        other => panic!("expected 403, got {other:?}"),
+    }
+}
+
+#[test]
 fn missing_required_fields_return_400() {
     let (_dir, db) = temp_db();
     let server = spawn_server(&db, &[]);
@@ -276,4 +309,122 @@ fn missing_required_fields_return_400() {
         }
         other => panic!("expected error, got {other:?}"),
     }
+}
+
+#[test]
+fn proxy_forwards_real_tool_call_and_structured_http_error() {
+    let (dir, db) = temp_db();
+    let server = spawn_server(&db, &[]);
+    let mut proxy = spawn_proxy(dir.path(), &server.addr);
+    let mut stdin = proxy.stdin.take().unwrap();
+    let mut stdout = BufReader::new(proxy.stdout.take().unwrap());
+
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{{"name":"icm_memory_stats","arguments":{{}},"_meta":{{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{{}},"io.modelcontextprotocol/clientInfo":{{"name":"integration","version":"1"}}}}}}}}"#
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["id"], 1);
+    assert!(response.get("result").is_some(), "{response}");
+
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{{"arguments":{{}},"_meta":{{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":{{}},"io.modelcontextprotocol/clientInfo":{{"name":"integration","version":"1"}}}}}}}}"#
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["id"], 2);
+    assert_eq!(response["error"]["code"], -32020);
+
+    drop(stdin);
+    assert!(proxy.wait().unwrap().success());
+}
+
+#[test]
+fn proxy_restarts_a_stale_2025_session_without_leaking_initialize() {
+    let (dir, db) = temp_db();
+    let mut server = spawn_server(&db, &[]);
+    let mut proxy = spawn_proxy(dir.path(), &server.addr);
+    let mut stdin = proxy.stdin.take().unwrap();
+    let mut stdout = BufReader::new(proxy.stdout.take().unwrap());
+
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2025-11-25","capabilities":{{}},"clientInfo":{{"name":"integration","version":"1"}}}}}}"#
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    let mut line = String::new();
+    stdout.read_line(&mut line).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&line).unwrap()["id"],
+        1
+    );
+
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":99,"method":"ping","params":{{}}}}"#
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&line).unwrap()["id"],
+        99
+    );
+
+    server.child.kill().unwrap();
+    server.child.wait().unwrap();
+    let mut replacement = spawn_server_at(&db, &server.addr, &[]);
+
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{{}}}}"#
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["id"], 2);
+    assert!(response.get("result").is_some(), "{response}");
+
+    replacement.child.kill().unwrap();
+    replacement.child.wait().unwrap();
+    let replacement = spawn_server_at(&db, &server.addr, &[]);
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    writeln!(
+        stdin,
+        r#"{{"jsonrpc":"2.0","id":3,"method":"ping","params":{{}}}}"#
+    )
+    .unwrap();
+    stdin.flush().unwrap();
+    line.clear();
+    stdout.read_line(&mut line).unwrap();
+    let response: serde_json::Value = serde_json::from_str(&line).unwrap();
+    assert_eq!(response["id"], 3);
+    assert!(response.get("result").is_some(), "{response}");
+
+    drop(stdin);
+    assert!(proxy.wait().unwrap().success());
+    drop(replacement);
 }

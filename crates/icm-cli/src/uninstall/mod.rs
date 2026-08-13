@@ -102,6 +102,11 @@ pub fn run(opts: UninstallOpts) -> Result<i32> {
     let dirs = locations::DirContext::from_env()?;
     let specs = locations::build_locations(&dirs);
     let mut plan = discover::scan(&specs, opts.purge_data)?;
+    let provider_paths = crate::provider::owned_paths()?;
+    let provider_entries = provider_paths
+        .iter()
+        .map(|owned| owned.entries_owned)
+        .sum::<usize>();
     if let Some(dir) = opts.scan_dir.as_deref() {
         plan.scan_dir_hits = scan_dir::scan_dir(dir)?;
     }
@@ -117,23 +122,38 @@ pub fn run(opts: UninstallOpts) -> Result<i32> {
 
     // --- Read-only modes ---
     if opts.check {
-        return Ok(report::print_check(&plan));
+        return Ok(report::print_check(&plan, provider_entries));
     }
     if opts.audit {
-        report::print_audit(&plan, "ICM uninstall audit", opts.purge_data);
+        report::print_audit(
+            &plan,
+            "ICM uninstall audit",
+            opts.purge_data,
+            &provider_paths,
+        );
         return Ok(exit_codes::CLEAN);
     }
     if opts.dry_run {
-        report::print_audit(&plan, "ICM uninstall (dry run)", opts.purge_data);
+        report::print_audit(
+            &plan,
+            "ICM uninstall (dry run)",
+            opts.purge_data,
+            &provider_paths,
+        );
         return Ok(exit_codes::CLEAN);
     }
 
     // --- Mutating run ---
-    if plan.is_empty() {
+    if plan.is_empty() && provider_paths.is_empty() {
         println!("Nothing to uninstall — already clean.");
         return Ok(exit_codes::CLEAN);
     }
-    report::print_audit(&plan, "ICM uninstall plan", opts.purge_data);
+    report::print_audit(
+        &plan,
+        "ICM uninstall plan",
+        opts.purge_data,
+        &provider_paths,
+    );
 
     if !opts.yes && !mutate::confirm("Proceed with removal?") {
         println!("Aborted (no changes made).");
@@ -158,8 +178,31 @@ pub fn run(opts: UninstallOpts) -> Result<i32> {
         )?)
     };
 
+    if let Some(backup) = backup_session.as_mut() {
+        for owned in &provider_paths {
+            backup.stage(&owned.path)?;
+        }
+    }
+
+    let provider_removed = crate::provider::strip_all_owned()?;
+    let mut outcomes = provider_removed
+        .outcomes
+        .into_iter()
+        .map(|outcome| mutate::ApplyOutcome {
+            path: outcome.path,
+            label: "Provider MCP",
+            entries_removed: outcome.entries_removed,
+            result: Ok(if outcome.deleted {
+                formats::StripResult::DeleteFile
+            } else {
+                formats::StripResult::Removed {
+                    removed: outcome.entries_removed,
+                }
+            }),
+        })
+        .collect::<Vec<_>>();
+    outcomes.extend(mutate::apply(&plan, &specs, &mut backup_session));
     let mut summary = mutate::ApplySummary::default();
-    let outcomes = mutate::apply(&plan, &specs, &mut backup_session);
     for o in &outcomes {
         summary.record(o);
     }
@@ -225,11 +268,16 @@ pub fn run(opts: UninstallOpts) -> Result<i32> {
     // Verify pass: rescan to detect any residue (ambiguous YAML, parse
     // errors that skipped a file, etc.).
     let after = discover::scan(&specs, opts.purge_data)?;
+    let provider_after = crate::provider::owned_paths()?;
+    let provider_residue = provider_after
+        .iter()
+        .map(|owned| owned.entries_owned)
+        .sum::<usize>();
     let exit = report::print_apply_summary(
         &outcomes,
         &summary,
         backup_session.as_ref().map(|b| b.root()),
-        after.total_hits(),
+        after.total_hits() + provider_residue,
     );
     Ok(exit)
 }

@@ -19,6 +19,7 @@ use super::locations::{HookCommandField, LocationKind, LocationSpec};
 pub(crate) struct ApplyOutcome {
     pub path: std::path::PathBuf,
     pub label: &'static str,
+    pub entries_removed: usize,
     pub result: Result<StripResult>,
 }
 
@@ -91,9 +92,14 @@ pub(crate) fn apply(
                 LocationKind::DataDir => Ok(StripResult::NoOp),
             }
         })();
+        let entries_removed = match &result {
+            Ok(StripResult::Removed { removed }) => *removed,
+            _ => 0,
+        };
         outcomes.push(ApplyOutcome {
             path: hit.path.clone(),
             label: hit.spec_label,
+            entries_removed,
             result,
         });
     }
@@ -170,6 +176,7 @@ pub(crate) fn purge_data(
         outcomes.push(ApplyOutcome {
             path: hit.path.clone(),
             label: hit.spec_label,
+            entries_removed: 0,
             result: res,
         });
     }
@@ -184,18 +191,30 @@ pub(crate) struct ApplySummary {
     pub entries_removed: usize,
     pub errors: Vec<(std::path::PathBuf, String)>,
     pub ambiguous: Vec<(std::path::PathBuf, String)>,
+    changed_paths: std::collections::BTreeSet<std::path::PathBuf>,
+    deleted_paths: std::collections::BTreeSet<std::path::PathBuf>,
 }
 
 impl ApplySummary {
     pub fn record(&mut self, outcome: &ApplyOutcome) {
         match &outcome.result {
             Ok(StripResult::NoOp) => {}
-            Ok(StripResult::Removed { removed }) => {
-                self.files_changed += 1;
-                self.entries_removed += removed;
+            Ok(StripResult::Removed { .. }) => {
+                self.entries_removed += outcome.entries_removed;
+                if !self.deleted_paths.contains(&outcome.path)
+                    && self.changed_paths.insert(outcome.path.clone())
+                {
+                    self.files_changed += 1;
+                }
             }
             Ok(StripResult::DeleteFile) => {
-                self.files_deleted += 1;
+                self.entries_removed += outcome.entries_removed;
+                if self.changed_paths.remove(&outcome.path) {
+                    self.files_changed -= 1;
+                }
+                if self.deleted_paths.insert(outcome.path.clone()) {
+                    self.files_deleted += 1;
+                }
             }
             Ok(StripResult::Ambiguous { reason }) => {
                 self.ambiguous.push((outcome.path.clone(), reason.clone()));

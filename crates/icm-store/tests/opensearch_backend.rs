@@ -275,3 +275,30 @@ fn opensearch_consolidate_topic_cleans_up_dangling_related_ids_in_other_memories
     }
     let _ = store.delete(&external_id);
 }
+
+#[test]
+fn opensearch_topic_limit_breaks_weight_ties_by_id() {
+    if skip_if_no_os() {
+        return;
+    }
+    let store = Store::with_dims(
+        std::path::Path::new("ignored"),
+        icm_core::DEFAULT_EMBEDDING_DIMS,
+    )
+    .expect("connect + migrate opensearch");
+    let topic = format!("itest-order-{}", ulid::Ulid::new());
+    let mut later = mem(&topic, "later id", Importance::Medium);
+    later.id = "01ZZZZZZZZZZZZZZZZZZZZZZZZ".into();
+    later.weight = 1.0;
+    let mut earlier = mem(&topic, "earlier id", Importance::Medium);
+    earlier.id = "01000000000000000000000000".into();
+    earlier.weight = 1.0;
+    store.store(later).unwrap();
+    store.store(earlier).unwrap();
+
+    let selected = store.get_by_topics_limited(&[&topic], 1).unwrap();
+    assert_eq!(selected[0].id, "01000000000000000000000000");
+    for memory in store.get_by_topic(&topic).unwrap() {
+        let _ = store.delete(&memory.id);
+    }
+}

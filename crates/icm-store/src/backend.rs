@@ -450,6 +450,9 @@ impl Store {
     pub fn get_many(&self, ids: &[&str]) -> IcmResult<HashMap<String, Memory>> {
         dispatch!(self, get_many(ids))
     }
+    pub fn get_by_topics_limited(&self, topics: &[&str], limit: usize) -> IcmResult<Vec<Memory>> {
+        dispatch!(self, get_by_topics_limited(topics, limit))
+    }
     pub fn get_by_topic_prefix(&self, topic: &str) -> IcmResult<Vec<Memory>> {
         dispatch!(self, get_by_topic_prefix(topic))
     }

@@ -2,18 +2,25 @@
 
 use serde_json::{json, Value};
 
-use icm_core::TranscriptStore;
-
 use icm_store::Store;
 
+use crate::outputs::{
+    TranscriptRecordOutput, TranscriptSearchOutput, TranscriptShowOutput, TranscriptStartOutput,
+    TranscriptStatsOutput,
+};
 use crate::protocol::ToolResult;
 
 pub(in crate::tools) fn tool_transcript_start_session(store: &Store, args: &Value) -> ToolResult {
+    use icm_core::TranscriptStore;
     let agent = args.get("agent").and_then(|v| v.as_str()).unwrap_or("mcp");
     let project = args.get("project").and_then(|v| v.as_str());
     let metadata = args.get("metadata").and_then(|v| v.as_str());
     match store.create_session(agent, project, metadata) {
-        Ok(id) => ToolResult::text(format!("{{\"session_id\":\"{id}\"}}")),
+        Ok(id) => {
+            let legacy = format!("{{\"session_id\":\"{id}\"}}");
+            let output = TranscriptStartOutput::new(id);
+            ToolResult::structured(legacy, "Transcript session started.".into(), &output)
+        }
         Err(e) => ToolResult::error(format!("start_session failed: {e}")),
     }
 }
@@ -44,12 +51,17 @@ pub(in crate::tools) fn tool_transcript_record(store: &Store, args: &Value) -> T
     let tokens = args.get("tokens").and_then(|v| v.as_i64());
     let metadata = args.get("metadata").and_then(|v| v.as_str());
     match store.record_message(session_id, role, content, tool_name, tokens, metadata) {
-        Ok(id) => ToolResult::text(format!("{{\"message_id\":\"{id}\"}}")),
+        Ok(id) => {
+            let legacy = format!("{{\"message_id\":\"{id}\"}}");
+            let output = TranscriptRecordOutput::new(id);
+            ToolResult::structured(legacy, "Transcript message recorded.".into(), &output)
+        }
         Err(e) => ToolResult::error(format!("record failed: {e}")),
     }
 }
 
 pub(in crate::tools) fn tool_transcript_search(store: &Store, args: &Value) -> ToolResult {
+    use icm_core::TranscriptStore;
     let query = match args.get("query").and_then(|v| v.as_str()) {
         Some(s) => s,
         None => return ToolResult::error("query is required".into()),
@@ -64,13 +76,19 @@ pub(in crate::tools) fn tool_transcript_search(store: &Store, args: &Value) -> T
     match store.search_transcripts(query, session_id, project, limit) {
         Ok(hits) => {
             let json = serde_json::to_string(&hits).unwrap_or_else(|_| "[]".into());
-            ToolResult::text(json)
+            let output = TranscriptSearchOutput::new(&hits);
+            ToolResult::structured(
+                json,
+                format!("Found {} transcript messages.", output.len()),
+                &output,
+            )
         }
         Err(e) => ToolResult::error(format!("search failed: {e}")),
     }
 }
 
 pub(in crate::tools) fn tool_transcript_show(store: &Store, args: &Value) -> ToolResult {
+    use icm_core::TranscriptStore;
     let session_id = match args.get("session_id").and_then(|v| v.as_str()) {
         Some(s) => s,
         None => return ToolResult::error("session_id is required".into()),
@@ -89,13 +107,23 @@ pub(in crate::tools) fn tool_transcript_show(store: &Store, args: &Value) -> Too
         Ok(m) => m,
         Err(e) => return ToolResult::error(format!("list_messages failed: {e}")),
     };
+    let output = TranscriptShowOutput::new(&sess, &msgs);
     let body = json!({ "session": sess, "messages": msgs });
-    ToolResult::text(body.to_string())
+    ToolResult::structured(
+        body.to_string(),
+        format!("Returned a transcript with {} messages.", output.len()),
+        &output,
+    )
 }
 
 pub(in crate::tools) fn tool_transcript_stats(store: &Store) -> ToolResult {
+    use icm_core::TranscriptStore;
     match store.transcript_stats() {
-        Ok(s) => ToolResult::text(serde_json::to_string(&s).unwrap_or_else(|_| "{}".into())),
+        Ok(stats) => {
+            let legacy = serde_json::to_string(&stats).unwrap_or_else(|_| "{}".into());
+            let output = TranscriptStatsOutput::from(stats);
+            ToolResult::structured(legacy, "Returned transcript statistics.".into(), &output)
+        }
         Err(e) => ToolResult::error(format!("stats failed: {e}")),
     }
 }

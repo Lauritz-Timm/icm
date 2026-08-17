@@ -173,6 +173,30 @@ cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings
 
 ---
 
+## MCP evaluator changes
+
+Changes to MCP behavior should be exercised through the workspace evaluator
+when applicable. Keep synthetic fixtures, frozen contracts/goldens,
+normalization, metrics, and isolation assertions in `crates/icm-mcp-eval`;
+do not reimplement production protocol, framing, dispatch, or schemas there.
+Ordinary MCP scenarios use the production `icm-mcp` service in-process, while
+CLI, provider, proxy, HTTP, transport-edge, and process-isolation scenarios
+must remain candidate-process tests.
+
+Before opening a PR that changes the evaluator or MCP service, run:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --locked --offline -p icm-mcp-eval
+cargo run -p icm-mcp-eval --locked --offline -- verify-design \
+  --suite-root crates/icm-mcp-eval
+```
+
+Use a dedicated non-Git workspace for the two-root self-test. Never use real
+user state, credentials, provider configuration, network services, or a fixed
+port. See the evaluator README for candidate build and staging instructions.
+
 ## Questions?
 
 - **Bug reports & features**: [Issues](../../issues)

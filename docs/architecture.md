@@ -2,7 +2,11 @@
 
 ## Overview
 
-ICM is a Rust workspace of 4 crates that compile into a single binary. No runtime dependencies, no external services.
+ICM is a Rust workspace of four production crates that compile into a single
+binary, plus the non-published `icm-mcp-eval` development harness. The
+harness is not shipped in the binary and uses only synthetic state and
+loopback services. No production runtime dependencies or external services
+are required.
 
 ```
 icm (binary)
@@ -10,6 +14,9 @@ icm (binary)
 ├── icm-store     SQLite + FTS5 + sqlite-vec
 ├── icm-mcp       MCP server (JSON-RPC 2.0 over stdio)
 └── icm-cli       CLI, config, extraction, benchmarks
+
+Development-only:
+└── icm-mcp-eval  Frozen MCP contracts, isolated evaluator, metrics
 ```
 
 ## Crate Dependency Graph
@@ -23,6 +30,11 @@ icm-cli ──────► icm-core
             │
             └──► icm-core
 ```
+
+`icm-mcp-eval` links `icm-mcp`/`icm-store` only for its ordinary in-process
+MCP lane. Its fixture builder remains independent and uses committed SQL/JSON.
+CLI, transport-edge, proxy, HTTP, provider, and isolation scenarios invoke a
+staged candidate process with a cleared synthetic environment.
 
 ## icm-core
 
@@ -295,7 +307,7 @@ On store via MCP, if an existing memory in the same topic has >85% hybrid search
 
 ## icm-mcp
 
-MCP server implementing JSON-RPC 2.0 over stdio. 18 tools.
+MCP server implementing JSON-RPC 2.0 over stdio. The current catalog contains 31 tools (with 11 structured modern projections).
 
 ### Protocol Flow
 
@@ -407,15 +419,27 @@ Sentences below threshold are dropped. Dedup via Jaccard similarity (>0.6 = skip
 ```bash
 cargo build --release                           # Full build with embeddings
 cargo build --release --no-default-features     # Without embeddings (fast, small)
+cargo build --locked -p icm-mcp-eval                  # Evaluator harness
 ```
+
+The evaluator's frozen contracts can be checked with:
+
+```bash
+cargo test --locked -p icm-mcp-eval
+cargo run --locked --offline -p icm-mcp-eval -- \
+  verify-design --suite-root crates/icm-mcp-eval
+```
+
+For staged two-root candidate acceptance, see
+[`crates/icm-mcp-eval/README.md`](../crates/icm-mcp-eval/README.md).
 
 The `embeddings` feature adds fastembed + ort (~2GB debug build). Use `--no-default-features` for fast iteration on non-embedding code.
 
 ## Testing
 
 ```bash
-cargo test          # 110 tests across all crates
-cargo clippy        # Lint (CI uses -D warnings)
+cargo test --workspace          # Workspace tests, including the evaluator
+cargo clippy --workspace        # Lint (CI uses -D warnings)
 cargo fmt --check   # Format check
 ```
 
@@ -451,3 +475,35 @@ Environment variables:
 - Embedding model runs locally (no API calls unless explicitly configured)
 - Self-links rejected via SQL CHECK constraint
 - Tested against: SQL injection, FTS injection, null bytes, unicode boundaries, 500KB payloads
+
+## MCP evaluation harness
+
+The workspace member `crates/icm-mcp-eval` is a hermetic evaluator, not a
+second MCP implementation. Its committed fixtures, contracts, normalization,
+metrics, and isolation checks remain evaluator-owned. Ordinary MCP scenarios
+use `icm-mcp::McpService` and `ConnectionState` in-process, so dispatch,
+protocol lifecycle, schemas, and projections cannot drift from production.
+
+Scenarios whose contract is transport, process, CLI, proxy, HTTP, or isolation
+behavior continue to launch the candidate as a separately controlled process.
+The runner clears the child environment, supplies synthetic state and working
+directories, disables embeddings, and records bounded wire/process evidence.
+Malformed JSON and oversized frames stay on the production stdio transport lane
+rather than being approximated by direct service calls. Provider scenarios
+likewise exercise the candidate CLI; the production trusted-provider command
+is required for candidate acceptance.
+
+Run the evaluator from the repository root:
+
+```bash
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --locked --offline -p icm-mcp-eval
+cargo run -p icm-mcp-eval --locked --offline -- verify-design \
+  --suite-root crates/icm-mcp-eval
+```
+
+For full offline two-root acceptance, build a process candidate with the
+features required by the selected lanes and follow the staged-workspace
+instructions in [`crates/icm-mcp-eval/README.md`](../crates/icm-mcp-eval/README.md).
+Do not point the runner at real home/configuration state or a Git worktree.

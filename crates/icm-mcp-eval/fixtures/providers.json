@@ -1,0 +1,217 @@
+{
+  "manifestPaths": {
+    "linux": {"root": "xdg-data", "relativePath": "icm/install-manifest.json"},
+    "macos": {"root": "home", "relativePath": "Library/Application Support/icm/install-manifest.json"},
+    "windows": {"root": "appdata", "relativePath": "icm/icm/data/install-manifest.json"}
+  },
+  "providers": [
+    {
+      "id": "codex",
+      "scopes": [
+        {
+          "scope": "project-local",
+          "dialect": "codex-toml-v1",
+          "surface": "combined-registration-and-permission",
+          "documents": [
+            {
+              "role": "registration-and-permission",
+              "root": "project",
+              "format": "toml",
+              "relativePath": ".codex/config.toml",
+              "initial": "[sentinel]\nkeep = \"codex-project-unchanged\"\n\n[mcp_servers.existing]\ncommand = \"existing-command\"\n\n[mcp_servers.existing.tools.existing_tool]\napproval_mode = \"deny\"\n"
+            }
+          ]
+        },
+        {
+          "scope": "user",
+          "dialect": "codex-toml-v1",
+          "surface": "combined-registration-and-permission",
+          "documents": [
+            {
+              "role": "registration-and-permission",
+              "root": "codex-user-config",
+              "format": "toml",
+              "relativePath": "config.toml",
+              "initial": "[sentinel]\nkeep = \"codex-user-unchanged\"\n\n[mcp_servers.existing]\ncommand = \"existing-command\"\n\n[mcp_servers.existing.tools.existing_tool]\napproval_mode = \"deny\"\n"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "claude-code",
+      "scopes": [
+        {
+          "scope": "project-local",
+          "dialect": "claude-json-v1",
+          "surface": "split-registration-and-permission",
+          "documents": [
+            {
+              "role": "registration",
+              "root": "project",
+              "format": "json",
+              "relativePath": ".mcp.json",
+              "initial": "{\"sentinel\":{\"keep\":\"claude-project-registration-unchanged\"},\"mcpServers\":{\"existing\":{\"command\":\"existing-command\"}}}"
+            },
+            {
+              "role": "permission",
+              "root": "project",
+              "format": "json",
+              "relativePath": ".claude/settings.local.json",
+              "initial": "{\"sentinel\":{\"keep\":\"claude-project-permission-unchanged\"},\"permissions\":{\"allow\":[\"Bash(git status)\"],\"deny\":[\"Bash(rm:*)\"],\"ask\":[\"WebFetch(*)\"]}}"
+            }
+          ]
+        },
+        {
+          "scope": "user",
+          "dialect": "claude-json-v1",
+          "surface": "split-registration-and-permission",
+          "documents": [
+            {
+              "role": "registration",
+              "root": "claude-user-config",
+              "format": "json",
+              "relativePath": ".claude.json",
+              "initial": "{\"sentinel\":{\"keep\":\"claude-user-registration-unchanged\"},\"mcpServers\":{\"existing\":{\"command\":\"existing-command\"}}}"
+            },
+            {
+              "role": "permission",
+              "root": "claude-user-config",
+              "format": "json",
+              "relativePath": "settings.json",
+              "initial": "{\"sentinel\":{\"keep\":\"claude-user-permission-unchanged\"},\"permissions\":{\"allow\":[\"Bash(git status)\"],\"deny\":[\"Bash(rm:*)\"],\"ask\":[\"WebFetch(*)\"]}}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "cursor",
+      "scopes": [
+        {
+          "scope": "project-local",
+          "dialect": "cursor-json-v1",
+          "surface": "split-registration-and-permission",
+          "documents": [
+            {
+              "role": "registration",
+              "root": "project",
+              "format": "json",
+              "relativePath": ".cursor/mcp.json",
+              "initial": "{\"sentinel\":{\"keep\":\"cursor-project-registration-unchanged\"},\"mcpServers\":{\"existing\":{\"command\":\"existing-command\"}}}"
+            },
+            {
+              "role": "permission",
+              "root": "project",
+              "format": "json",
+              "relativePath": ".cursor/cli.json",
+              "initial": "{\"sentinel\":{\"keep\":\"cursor-project-permission-unchanged\"},\"permissions\":{\"allow\":[\"Shell(git status)\"],\"deny\":[\"Shell(rm:*)\"]}}"
+            }
+          ]
+        },
+        {
+          "scope": "user",
+          "dialect": "cursor-json-v1",
+          "surface": "split-registration-and-permission",
+          "documents": [
+            {
+              "role": "registration",
+              "root": "cursor-user-config",
+              "format": "json",
+              "relativePath": "mcp.json",
+              "initial": "{\"sentinel\":{\"keep\":\"cursor-user-registration-unchanged\"},\"mcpServers\":{\"existing\":{\"command\":\"existing-command\"}}}"
+            },
+            {
+              "role": "permission",
+              "root": "cursor-user-config",
+              "format": "json",
+              "relativePath": "cli-config.json",
+              "initial": "{\"sentinel\":{\"keep\":\"cursor-user-permission-unchanged\"},\"permissions\":{\"allow\":[\"Shell(git status)\"],\"deny\":[\"Shell(rm:*)\"]}}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "opencode",
+      "scopes": [
+        {
+          "scope": "project-local",
+          "dialect": "opencode-json-v2",
+          "surface": "combined-registration-and-permission",
+          "documents": [
+            {
+              "role": "registration-and-permission",
+              "root": "project",
+              "format": "json",
+              "relativePath": "opencode.json",
+              "initial": "{\"sentinel\":{\"keep\":\"opencode-project-unchanged\"},\"mcp\":{\"servers\":{\"existing\":{\"type\":\"local\",\"command\":[\"existing-command\"]}}},\"permissions\":[{\"action\":\"existing_*\",\"resource\":\"*\",\"effect\":\"ask\"},{\"action\":\"dangerous_*\",\"resource\":\"*\",\"effect\":\"deny\"}]}"
+            }
+          ]
+        },
+        {
+          "scope": "user",
+          "dialect": "opencode-json-v2",
+          "surface": "combined-registration-and-permission",
+          "documents": [
+            {
+              "role": "registration-and-permission",
+              "root": "opencode-user-config",
+              "format": "json",
+              "relativePath": "opencode.json",
+              "initial": "{\"sentinel\":{\"keep\":\"opencode-user-unchanged\"},\"mcp\":{\"servers\":{\"existing\":{\"type\":\"local\",\"command\":[\"existing-command\"]}}},\"permissions\":[{\"action\":\"existing_*\",\"resource\":\"*\",\"effect\":\"ask\"},{\"action\":\"dangerous_*\",\"resource\":\"*\",\"effect\":\"deny\"}]}"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "zed",
+      "scopes": [
+        {
+          "scope": "project-local",
+          "dialect": "zed-json-v1",
+          "surface": "combined-registration-and-permission",
+          "documents": [
+            {
+              "role": "registration-and-permission",
+              "root": "project",
+              "format": "json",
+              "relativePath": ".zed/settings.json",
+              "initial": "{\"sentinel\":{\"keep\":\"zed-project-unchanged\"},\"context_servers\":{\"existing\":{\"command\":\"existing-command\"}},\"agent\":{\"tool_permissions\":{\"default\":\"confirm\",\"tools\":{\"existing.read\":{\"default\":\"allow\"},\"dangerous.write\":{\"default\":\"deny\"}}}}}"
+            }
+          ]
+        },
+        {
+          "scope": "user",
+          "dialect": "zed-json-v1",
+          "surface": "combined-registration-and-permission",
+          "documents": [
+            {
+              "role": "registration-and-permission",
+              "root": "zed-user-config",
+              "format": "json",
+              "relativePath": "settings.json",
+              "initial": "{\"sentinel\":{\"keep\":\"zed-user-unchanged\"},\"context_servers\":{\"existing\":{\"command\":\"existing-command\"}},\"agent\":{\"tool_permissions\":{\"default\":\"confirm\",\"tools\":{\"existing.read\":{\"default\":\"allow\"},\"dangerous.write\":{\"default\":\"deny\"}}}}}"
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "ownedTools": [
+    "icm_memory_recall",
+    "icm_memory_store"
+  ],
+  "forbiddenPatterns": [
+    "*",
+    "icm_*",
+    "mcp__icm__*",
+    "server:icm:*"
+  ],
+  "manifestSchema": {
+    "currentVersion": 2,
+    "topLevelOwnershipField": "providerOwnership",
+    "producerVersion": "icm-provider-engine-v2"
+  }
+}

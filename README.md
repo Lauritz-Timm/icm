@@ -257,9 +257,31 @@ curl -s -X POST '127.0.0.1:11435/recall?format=json' \
   -d '{"query":"hello","topic":"t"}'
 ```
 
-Endpoints: `POST /store`, `POST /recall`, `POST /consolidate`, `GET /stats`, `GET /topics`, `GET /health`. Optional `--token <T>` enables `Authorization: Bearer <T>` on every request (health stays open as a liveness probe). Bound to whatever address you pass; `127.0.0.1:<port>` keeps the server localhost-only.
+Endpoints: `POST /mcp`, `DELETE /mcp`, `POST /store`, `POST /recall`, `POST /consolidate`, `GET /stats`, `GET /topics`, `GET /health`. Optional `--token <T>` enables `Authorization: Bearer <T>` on every request (health stays open as a liveness probe). Bound to whatever address you pass; `127.0.0.1:<port>` keeps the server localhost-only.
 
 Saves ~9 s per call vs one-shot CLI (model reload) — any scripting language can hit semantic recall with plain `curl`. Requires the `http-api` feature (enabled by default). Issue [#290](https://github.com/rtk-ai/icm/issues/290).
+
+### Share one warm MCP service
+
+Keep the HTTP server above running, then use this stdio MCP configuration in
+each client on Windows, macOS, or Linux:
+
+```json
+{
+  "command": "icm",
+  "args": ["proxy", "--url", "http://127.0.0.1:11435"]
+}
+```
+
+Each small proxy preserves its client's working directory and protocol state,
+while all clients share the daemon's store and single loaded embedding model.
+For an authenticated daemon, give the proxy `ICM_PROXY_TOKEN` or
+`--token-file <PATH>`; the proxy accepts loopback HTTP only.
+
+The tradeoff is one long-lived daemon RSS instead of loading the embedding
+model once per client process. Use direct `icm serve` for a single client, or
+start the daemon with `--no-embeddings` for lower memory and keyword-only
+recall.
 
 ## Dashboard
 
@@ -731,6 +753,7 @@ Score = 60% recall accuracy + 30% fact detail + 10% speed. **98% multi-agent eff
 |----------|-------------|
 | [Integration Guide](docs/integrations.md) | Setup for all 17 tools: Claude Code, Copilot, Cursor, Windsurf, Zed, Amp, etc. |
 | [Technical Architecture](docs/architecture.md) | Crate structure, search pipeline, decay model, sqlite-vec integration, testing |
+| [MCP Evaluator](crates/icm-mcp-eval/README.md) | Frozen MCP compatibility contracts, isolated 294-scenario runner, and CI commands |
 | [User Guide](docs/guide.md) | Installation, topic organization, consolidation, extraction, troubleshooting |
 | [Product Overview](docs/product.md) | Use cases, benchmarks, comparison with alternatives |
 

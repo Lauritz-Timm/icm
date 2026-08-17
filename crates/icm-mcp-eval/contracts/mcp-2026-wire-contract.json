@@ -1,0 +1,132 @@
+{
+  "contractVersion": 2,
+  "accessedAt": "2026-08-05",
+  "runtimeNetworkRequired": false,
+  "sources": [
+    "https://modelcontextprotocol.io/specification/2026-07-28/basic",
+    "https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning",
+    "https://modelcontextprotocol.io/specification/2026-07-28/server/discover",
+    "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/2026-07-28/schema.ts"
+  ],
+  "supportedVersionsNewestFirst": [
+    "2026-07-28",
+    "2025-11-25",
+    "2025-06-18",
+    "2024-11-05"
+  ],
+  "request": {
+    "metadataLocation": "/params/_meta",
+    "requiredMetadata": {
+      "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+      "io.modelcontextprotocol/clientCapabilities": {}
+    },
+    "optionalMetadata": {
+      "io.modelcontextprotocol/clientInfo": {
+        "name": "icm-cleanroom-eval",
+        "version": "1"
+      }
+    },
+    "discoveryMethod": "server/discover",
+    "topLevelMetadataDoesNotSatisfyRequiredMetadata": true,
+    "validBareMetadataKeyExample": "invalid",
+    "validExtensionMetadataKeyFixture": "com.example/evaluation",
+    "invalidMetadataKeyFixture": "1bad/foo",
+    "metadataKeyGrammar": "optional valid dotted-label prefix followed by slash, then a name that is empty or begins and ends alphanumeric",
+    "validateEveryRequest": true
+  },
+  "success": {
+    "requiredResultType": "complete",
+    "requiredProductResultMetadata": {
+      "io.modelcontextprotocol/serverInfo": {
+        "required": ["name", "version"]
+      }
+    }
+  },
+  "discovery": {
+    "capabilities": {"tools": {}, "resources": {}},
+    "instructionsNonEmpty": true,
+    "ttlMs": 3600000,
+    "cacheScope": "private"
+  },
+  "cache": {
+    "allowedScopes": ["public", "private"],
+    "minimumTtlMs": 0,
+    "server/discover": {"ttlMs": 3600000, "cacheScope": "private"},
+    "tools/list": {"ttlMs": 3600000, "cacheScope": "private"},
+    "resources/list": {"ttlMs": 3600000, "cacheScope": "private"},
+    "resources/read": {"ttlMs": 0, "cacheScope": "private"},
+    "tools/callIsCacheable": false
+  },
+  "errors": {
+    "invalidParams": -32602,
+    "methodNotFound": -32601,
+    "internal": -32603,
+    "resource2025NotFound": -32002,
+    "unsupportedVersion": {
+      "code": -32022,
+      "dataRequired": ["supported", "requested"]
+    },
+    "eraLocked": {
+      "code": -31010,
+      "allocation": "application-defined-outside-json-rpc-reserved-range",
+      "message": "protocol era is locked for this connection; open a new connection",
+      "dataRequired": ["kind", "selectedEra", "requestedEra"]
+    },
+    "lifecycleViolation": {
+      "code": -31011,
+      "allocation": "application-defined-outside-json-rpc-reserved-range",
+      "message": "protocol lifecycle violation; open a new connection",
+      "dataExact": ["kind", "state", "method"]
+    }
+  },
+  "connectionEra": {
+    "separateConnectionsMayUseDifferentEras": true,
+    "sameConnectionSwitchAllowed": false,
+    "policyAuthority": "ICM stdio compatibility policy, not an MCP-mandated error behavior",
+    "concurrentDualEraServiceRequiredByMcp": false,
+    "sameProcessConcurrentDualEraServiceImplemented": false,
+    "modernRequestsStateless": true,
+    "modernRequestStateInferredFromPriorRequests": false,
+    "legacySemanticsScope": "stdio-process",
+    "legacyOpenerRequiresInitializedNotification": true,
+    "modernOpener": "first successful request with valid 2026 metadata"
+  },
+  "initializedLifecycle": {
+    "states": ["uninitialized", "initialize-responded", "initialized", "protocol-error"],
+    "initializeMustBeFirst": true,
+    "initializedNotificationRequiredBeforeRequests": true,
+    "initializedNotificationExactlyOnce": true,
+    "secondInitializeForbidden": true,
+    "protocolErrorPoisonsConnection": true,
+    "complete2024Sequence": ["initialize", "initialize response", "notifications/initialized", "request"]
+  },
+  "resource": {
+    "conflictResolution": "This JSON/URI/three-topic/utf8-bytes-v1 contract is the frozen tie-breaker over conflicting specialist markdown/tokenizer and narrower-topic recommendations.",
+    "uri": "icm://active-project/context",
+    "descriptor": {
+      "name": "active-project-context",
+      "mimeType": "application/json",
+      "audience": ["assistant"],
+      "priority": 1.0
+    },
+    "exactTopicFormats": ["context-{project}", "contexte-{project}", "decisions-{project}"],
+    "templatesAdvertised": false,
+    "callerMaxTokensAccepted": false,
+    "portableBudget": {
+      "maxPortableTokens": 2048,
+      "maxSerializedTextBytes": 2048,
+      "algorithm": "utf8-bytes-v1",
+      "oneUtf8BytePerPortableToken": true,
+      "forceFirstItem": false
+    },
+    "listCache": {"ttlMs": 3600000, "cacheScope": "private"},
+    "readCache": {"ttlMs": 0, "cacheScope": "private"},
+    "emptyRepresentation": {
+      "contents": 1,
+      "memories": [],
+      "truncated": false,
+      "truncationReasons": [],
+      "omittedAtLeast": 0
+    }
+  }
+}

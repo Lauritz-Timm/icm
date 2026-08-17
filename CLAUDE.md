@@ -22,6 +22,12 @@ Créer une mémoire long-terme intelligente qui:
 
 ## Structure du workspace
 
+> Note de maintenance : le workspace actuel comprend `crates/icm-core`,
+> `crates/icm-store`, `crates/icm-mcp`, `crates/icm-cli`, et le harness de
+> développement `crates/icm-mcp-eval`. Ce dernier contient les contrats MCP
+> gelés et le runner hermétique ; voir son [README](crates/icm-mcp-eval/README.md).
+> Les phases et chemins historiques ci-dessous décrivent l'ancien prototype.
+
 ```
 icm/
 ├── Cargo.toml (workspace)

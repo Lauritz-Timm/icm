@@ -1,0 +1,20 @@
+[package]
+name = "icm-mcp-eval"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Fixture data and scenario state remain evaluator-owned and hermetic. The
+# evaluator links only the production MCP/storage service crates for its
+# in-process lane; candidate/CLI/proxy/HTTP lanes still run as isolated
+# processes with a cleared environment.
+[dependencies]
+icm-mcp = { path = "../icm-mcp", default-features = false, features = ["backend-sqlite"] }
+icm-store = { path = "../icm-store", default-features = false, features = ["backend-sqlite"] }
+anyhow = "1"
+chrono = { version = "0.4", features = ["serde"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", features = ["preserve_order"] }
+sha2 = "0.10"
+toml = "0.8"
+rusqlite = { version = "0.34", features = ["bundled"] }

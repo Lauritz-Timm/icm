@@ -10,17 +10,15 @@ use serde_json::{json, Map, Value};
 
 use crate::catalog::{DispatchResult, InputValidation, ToolCatalog, ToolContext};
 use crate::protocol::{
-    JsonRpcMessage, JsonRpcResponse, ProtocolEra, ProtocolRevision, SUPPORTED_PROTOCOL_VERSIONS,
+    valid_metadata_key, JsonRpcMessage, JsonRpcResponse, ProtocolEra, ProtocolRevision,
+    ERA_LOCKED_ERROR_CODE, LIFECYCLE_VIOLATION_ERROR_CODE, META_CLIENT_CAPABILITIES,
+    META_CLIENT_INFO, META_PROTOCOL_VERSION, META_SERVER_INFO, SUPPORTED_PROTOCOL_VERSIONS,
 };
 use crate::tools::{self, AutoConsolidate};
 
 const SERVER_NAME: &str = "icm";
 const SERVER_VERSION: &str = env!("CARGO_PKG_VERSION");
 const STORE_NUDGE_THRESHOLD: u32 = 10;
-const MODERN_PROTOCOL_VERSION_KEY: &str = "io.modelcontextprotocol/protocolVersion";
-const MODERN_CLIENT_CAPABILITIES_KEY: &str = "io.modelcontextprotocol/clientCapabilities";
-const MODERN_CLIENT_INFO_KEY: &str = "io.modelcontextprotocol/clientInfo";
-const MODERN_SERVER_INFO_KEY: &str = "io.modelcontextprotocol/serverInfo";
 const MODERN_LOG_LEVEL_KEY: &str = "io.modelcontextprotocol/logLevel";
 const MODERN_SUBSCRIPTION_ID_KEY: &str = "io.modelcontextprotocol/subscriptionId";
 const MAX_STORED_LIFECYCLE_METHOD_BYTES: usize = 256;
@@ -755,7 +753,7 @@ fn bounded_lifecycle_method(method: &str) -> String {
 fn lifecycle_error(id: Value, violation: &LifecycleViolation) -> JsonRpcResponse {
     JsonRpcResponse::err_with_data(
         id,
-        -31011,
+        LIFECYCLE_VIOLATION_ERROR_CODE,
         "protocol lifecycle violation; open a new connection".into(),
         Some(json!({
             "kind": violation.kind,
@@ -768,7 +766,7 @@ fn lifecycle_error(id: Value, violation: &LifecycleViolation) -> JsonRpcResponse
 fn era_locked_error(id: Value, selected: ProtocolEra, requested: ProtocolEra) -> JsonRpcResponse {
     JsonRpcResponse::err_with_data(
         id,
-        -31010,
+        ERA_LOCKED_ERROR_CODE,
         "protocol era is locked for this connection; open a new connection".into(),
         Some(json!({
             "kind": "protocolEraLocked",
@@ -787,9 +785,9 @@ fn requests_modern_era(message: &JsonRpcMessage) -> bool {
         .and_then(Value::as_object)
         .is_some_and(|metadata| {
             [
-                MODERN_PROTOCOL_VERSION_KEY,
-                MODERN_CLIENT_CAPABILITIES_KEY,
-                MODERN_CLIENT_INFO_KEY,
+                META_PROTOCOL_VERSION,
+                META_CLIENT_CAPABILITIES,
+                META_CLIENT_INFO,
             ]
             .into_iter()
             .any(|key| metadata.contains_key(key))
@@ -846,13 +844,10 @@ fn validate_modern_request(
     };
     validate_metadata_shape(&id, metadata)?;
 
-    let Some(requested) = metadata
-        .get(MODERN_PROTOCOL_VERSION_KEY)
-        .and_then(Value::as_str)
-    else {
+    let Some(requested) = metadata.get(META_PROTOCOL_VERSION).and_then(Value::as_str) else {
         return Err(invalid_params(
             id,
-            format!("missing or invalid {MODERN_PROTOCOL_VERSION_KEY}"),
+            format!("missing or invalid {META_PROTOCOL_VERSION}"),
         ));
     };
     if requested != ProtocolRevision::V2026_07_28.as_str() {
@@ -860,24 +855,21 @@ fn validate_modern_request(
     }
 
     let Some(capabilities) = metadata
-        .get(MODERN_CLIENT_CAPABILITIES_KEY)
+        .get(META_CLIENT_CAPABILITIES)
         .filter(|capabilities| valid_client_capabilities(capabilities))
     else {
         return Err(invalid_params(
             id,
-            format!("missing or invalid {MODERN_CLIENT_CAPABILITIES_KEY}"),
+            format!("missing or invalid {META_CLIENT_CAPABILITIES}"),
         ));
     };
     debug_assert!(capabilities.is_object());
 
     if metadata
-        .get(MODERN_CLIENT_INFO_KEY)
+        .get(META_CLIENT_INFO)
         .is_some_and(|identity| !valid_implementation_identity(identity))
     {
-        return Err(invalid_params(
-            id,
-            format!("invalid {MODERN_CLIENT_INFO_KEY}"),
-        ));
+        return Err(invalid_params(id, format!("invalid {META_CLIENT_INFO}")));
     }
     validate_optional_metadata_values(&id, metadata)
 }
@@ -915,22 +907,22 @@ fn validate_modern_notification(message: &JsonRpcMessage) -> Result<(), String> 
     validate_metadata_shape(&null_id, metadata)
         .map_err(|_| "notification metadata has an invalid key or size".to_owned())?;
     if metadata
-        .get(MODERN_PROTOCOL_VERSION_KEY)
+        .get(META_PROTOCOL_VERSION)
         .is_some_and(|version| version.as_str() != Some(ProtocolRevision::V2026_07_28.as_str()))
     {
-        return Err(format!("invalid {MODERN_PROTOCOL_VERSION_KEY}"));
+        return Err(format!("invalid {META_PROTOCOL_VERSION}"));
     }
     if metadata
-        .get(MODERN_CLIENT_CAPABILITIES_KEY)
+        .get(META_CLIENT_CAPABILITIES)
         .is_some_and(|capabilities| !valid_client_capabilities(capabilities))
     {
-        return Err(format!("invalid {MODERN_CLIENT_CAPABILITIES_KEY}"));
+        return Err(format!("invalid {META_CLIENT_CAPABILITIES}"));
     }
     if metadata
-        .get(MODERN_CLIENT_INFO_KEY)
+        .get(META_CLIENT_INFO)
         .is_some_and(|identity| !valid_implementation_identity(identity))
     {
-        return Err(format!("invalid {MODERN_CLIENT_INFO_KEY}"));
+        return Err(format!("invalid {META_CLIENT_INFO}"));
     }
     validate_optional_metadata_values(&null_id, metadata)
         .map_err(|_| "notification metadata has an invalid value".to_owned())
@@ -1098,53 +1090,6 @@ fn validate_optional_metadata_values(
     Ok(())
 }
 
-fn valid_metadata_key(key: &str) -> bool {
-    match key.split_once('/') {
-        Some((prefix, name)) => {
-            !name.contains('/') && valid_metadata_prefix(prefix) && valid_metadata_name(name)
-        }
-        None => valid_metadata_name(key),
-    }
-}
-
-fn valid_metadata_prefix(prefix: &str) -> bool {
-    !prefix.is_empty() && prefix.split('.').all(valid_metadata_prefix_label)
-}
-
-fn valid_metadata_prefix_label(label: &str) -> bool {
-    let mut characters = label.chars();
-    let Some(first) = characters.next() else {
-        return false;
-    };
-    if !first.is_ascii_alphabetic() {
-        return false;
-    }
-    let Some(last) = label.chars().next_back() else {
-        return false;
-    };
-    last.is_ascii_alphanumeric()
-        && label
-            .chars()
-            .all(|character| character.is_ascii_alphanumeric() || character == '-')
-}
-
-fn valid_metadata_name(name: &str) -> bool {
-    if name.is_empty() {
-        return true;
-    }
-    let Some(first) = name.chars().next() else {
-        unreachable!("empty metadata names are handled above");
-    };
-    let Some(last) = name.chars().next_back() else {
-        return false;
-    };
-    first.is_ascii_alphanumeric()
-        && last.is_ascii_alphanumeric()
-        && name.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.')
-        })
-}
-
 fn valid_initialize_client_capabilities(revision: ProtocolRevision, value: &Value) -> bool {
     if revision == ProtocolRevision::V2026_07_28 {
         return valid_client_capabilities(value);
@@ -1247,9 +1192,7 @@ fn valid_tasks_capability(value: &Value) -> bool {
 }
 
 fn valid_prefixed_metadata_key(key: &str) -> bool {
-    key.split_once('/').is_some_and(|(prefix, name)| {
-        !name.contains('/') && valid_metadata_prefix(prefix) && valid_metadata_name(name)
-    })
+    key.contains('/') && valid_metadata_key(key)
 }
 
 fn valid_implementation_identity(value: &Value) -> bool {
@@ -1648,7 +1591,7 @@ fn project_result(
     let metadata = metadata
         .as_object_mut()
         .expect("MCP result metadata must have an object root");
-    metadata.insert(MODERN_SERVER_INFO_KEY.into(), server_info());
+    metadata.insert(META_SERVER_INFO.into(), server_info());
     if let Some((ttl_ms, scope)) = cache {
         object.insert("ttlMs".into(), json!(ttl_ms));
         object.insert("cacheScope".into(), Value::String(scope.into()));
@@ -1753,8 +1696,8 @@ mod tests {
 
     fn modern_metadata() -> Value {
         json!({
-            MODERN_PROTOCOL_VERSION_KEY: "2026-07-28",
-            MODERN_CLIENT_CAPABILITIES_KEY: {}
+            META_PROTOCOL_VERSION: "2026-07-28",
+            META_CLIENT_CAPABILITIES: {}
         })
     }
 
@@ -2312,15 +2255,15 @@ mod tests {
                 request(json!({
                     "jsonrpc":"2.0","id":1,"method":"server/discover",
                     "params":{"_meta":{
-                        MODERN_PROTOCOL_VERSION_KEY:"2026-07-28",
-                        MODERN_CLIENT_CAPABILITIES_KEY:{}
+                        META_PROTOCOL_VERSION:"2026-07-28",
+                        META_CLIENT_CAPABILITIES:{}
                     }}
                 })),
             )
             .unwrap();
         let result = response.result.unwrap();
         assert_eq!(result["resultType"], "complete");
-        assert_eq!(result["_meta"][MODERN_SERVER_INFO_KEY]["name"], SERVER_NAME);
+        assert_eq!(result["_meta"][META_SERVER_INFO]["name"], SERVER_NAME);
     }
 
     #[test]
@@ -2334,9 +2277,9 @@ mod tests {
                 request(json!({
                     "jsonrpc":"2.0","id":1,"method":"server/discover",
                     "params":{"_meta":{
-                        MODERN_PROTOCOL_VERSION_KEY:"2026-07-28",
-                        MODERN_CLIENT_CAPABILITIES_KEY:{},
-                        MODERN_CLIENT_INFO_KEY:{
+                        META_PROTOCOL_VERSION:"2026-07-28",
+                        META_CLIENT_CAPABILITIES:{},
+                        META_CLIENT_INFO:{
                             "name":"test","version":"1","icons":"not-an-array"
                         }
                     }}
@@ -2386,8 +2329,8 @@ mod tests {
                 request(json!({
                     "jsonrpc":"2.0","id":1,"method":"server/discover",
                     "params":{"_meta":{
-                        MODERN_PROTOCOL_VERSION_KEY:"2026-07-28",
-                        MODERN_CLIENT_CAPABILITIES_KEY:{
+                        META_PROTOCOL_VERSION:"2026-07-28",
+                        META_CLIENT_CAPABILITIES:{
                             "sampling":{"context":{},"tools":{},"future":5},
                             "elicitation":{"form":{},"url":{},"future":false},
                             "experimental":{"x":{}},
@@ -2622,8 +2565,8 @@ mod tests {
                 request(json!({
                     "jsonrpc":"2.0","id":1,"method":"server/discover",
                     "params":{"_meta":{
-                        MODERN_PROTOCOL_VERSION_KEY:"2026-07-28",
-                        MODERN_CLIENT_CAPABILITIES_KEY:{},
+                        META_PROTOCOL_VERSION:"2026-07-28",
+                        META_CLIENT_CAPABILITIES:{},
                         "traceparent":"00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
                         "tracestate":"vendor=value",
                         "baggage":"project=icm"
@@ -2639,8 +2582,8 @@ mod tests {
                 request(json!({
                     "jsonrpc":"2.0","id":2,"method":"ping",
                     "params":{"_meta":{
-                        MODERN_PROTOCOL_VERSION_KEY:"2026-07-28",
-                        MODERN_CLIENT_CAPABILITIES_KEY:{},
+                        META_PROTOCOL_VERSION:"2026-07-28",
+                        META_CLIENT_CAPABILITIES:{},
                         "traceparent":{"wrong":"type"}
                     }}
                 })),
@@ -2838,8 +2781,8 @@ mod tests {
                 request(json!({
                     "jsonrpc":"2.0","id":1,"method":"resources/list",
                     "params":{"_meta":{
-                        MODERN_PROTOCOL_VERSION_KEY:"2026-07-28",
-                        MODERN_CLIENT_CAPABILITIES_KEY:{}
+                        META_PROTOCOL_VERSION:"2026-07-28",
+                        META_CLIENT_CAPABILITIES:{}
                     }}
                 })),
             )
@@ -3168,7 +3111,7 @@ mod tests {
         assert_eq!(modern_result["isError"], true);
         assert_eq!(modern_result["resultType"], "complete");
         assert_eq!(
-            modern_result["_meta"][MODERN_SERVER_INFO_KEY]["name"],
+            modern_result["_meta"][META_SERVER_INFO]["name"],
             SERVER_NAME
         );
     }

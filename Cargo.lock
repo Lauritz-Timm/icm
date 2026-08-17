@@ -1536,6 +1536,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "icm-mcp-eval"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "icm-mcp",
+ "icm-store",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "toml",
+]
+
+[[package]]
 name = "icm-store"
 version = "0.10.34"
 dependencies = [

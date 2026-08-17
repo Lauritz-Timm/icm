@@ -57,6 +57,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace
 
+  # Keep the frozen evaluator's contracts and executable scenario inventory
+  # checked independently of a candidate acceptance run. Provider scenarios
+  # remain in the separate candidate acceptance lane because this gate does
+  # not invoke a candidate or use host state/network services.
+  mcp-eval-contracts:
+    name: MCP evaluator contracts
+    needs: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --locked -p icm-mcp-eval --no-fail-fast
+      - run: cargo run --locked -p icm-mcp-eval -- verify-design --suite-root crates/icm-mcp-eval
+
   # Validates the fully-static musl binary shipped for old-glibc distros
   # (issue #330: the glibc binaries need symbols newer than Debian Bookworm's
   # glibc 2.36). Embeddings are dropped because `ort`/onnxruntime ships only

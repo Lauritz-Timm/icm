@@ -1,0 +1,416 @@
+{
+  "designVersion": 12,
+  "scenarioCount": 294,
+  "baselineMetricsSha256": "45bdccf1b1aabf732120801832563cc45db8e9c8a658e6a720c33158a505f306",
+  "provenance": {
+    "initialDesignFrozenAt": "2026-08-05",
+    "initialDesignFrozenBeforeReplacementImplementation": true,
+    "laterRevisionsArePostImplementationAuditSpecCorrections": true,
+    "version9FrozenBeforeInitialFinalCandidateRun": true,
+    "version10FrozenBeforeCorrectedCandidateRun": true,
+    "version11FrozenBeforeDefinitiveTwoRootSelfTest": true,
+    "version12FrozenBeforeCorrectedTwoRootSelfTest": true,
+    "scenarioInventoryAndThresholdsUnchanged": true,
+    "version9Revision": "Provider/OpenCode and HTTP session/Origin audit/spec corrections.",
+    "version10Revision": "Align the evaluator with the final provider journal and revision-sensitive proxy headers, and close portable provider-state, Git-ancestry, and cross-scenario canary gaps.",
+    "version11Revision": "Remove stale modern text ULID normalization rules: modern IDs are normalized in structuredContent while concise text intentionally does not duplicate them.",
+    "version12Revision": "Declare exact normalization pointers for the remaining dynamic structured IDs and RFC3339 timestamps exposed by the v11 two-root diff; scenarios and thresholds remain unchanged."
+  },
+  "officialSources": {
+    "accessedAt": "2026-08-05",
+    "runtimeNetworkRequired": false,
+    "contractFixture": "contracts/mcp-2026-wire-contract.json",
+    "urls": [
+      "https://modelcontextprotocol.io/specification/2026-07-28/basic",
+      "https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning",
+      "https://modelcontextprotocol.io/specification/2026-07-28/server/discover",
+      "https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/schema/2026-07-28/schema.ts"
+    ]
+  },
+  "protocols": {
+    "legacy": ["2024-11-05"],
+    "initializedModern": ["2025-06-18", "2025-11-25"],
+    "perRequestModern": ["2026-07-28"],
+    "supportedNewestFirst": ["2026-07-28", "2025-11-25", "2025-06-18", "2024-11-05"],
+    "connectionEraPolicy": "ICM stdio compatibility policy chooses one era per process from its successful opener; MCP permits but does not require concurrent dual-era service",
+    "connectionEraPolicyAuthority": "ICM compatibility policy, not MCP-mandated error behavior",
+    "concurrentDualEraServiceRequiredByMcp": false,
+    "modernRequestsStateless": true,
+    "eraLockedError": {
+      "code": -31010,
+      "message": "protocol era is locked for this connection; open a new connection",
+      "data": ["kind", "selectedEra", "requestedEra"]
+    }
+  },
+  "boundaryRevisionSemantics": {
+    "scenarioInventoryUnchanged": true,
+    "acceptanceThresholdsUnchanged": true,
+    "separateCandidateProcessPerLeg": true,
+    "eachSupportedLegRecordsLegPassed": true,
+    "invalidParamsCode": -32602,
+    "multiLegScenarios": {
+      "boundary.limit-under": {
+        "legacy2024": {
+          "requestLimit": 0,
+          "expectedEffectiveLimit": 1,
+          "expectedError": false,
+          "deterministicMatchingRows": 101
+        },
+        "modern2026": {
+          "requestLimit": 0,
+          "expectedErrorCode": -32602,
+          "metadataOnEveryRequest": true
+        }
+      },
+      "boundary.limit-over": {
+        "legacy2024": {
+          "requestLimit": 101,
+          "expectedEffectiveLimit": 20,
+          "expectedError": false,
+          "deterministicMatchingRows": 101
+        },
+        "modern2026": {
+          "requestLimit": 101,
+          "expectedErrorCode": -32602,
+          "metadataOnEveryRequest": true
+        }
+      },
+      "boundary.unknown-field": {
+        "tool": "icm_memory_recall",
+        "field": "unknownField",
+        "legacy2024": {
+          "unknownFieldIgnored": true,
+          "expectedError": false,
+          "expectedResultCount": 1
+        },
+        "modern2026": {
+          "unknownFieldRejected": true,
+          "expectedErrorCode": -32602,
+          "metadataOnEveryRequest": true
+        }
+      }
+    },
+    "modernOnlyScenarios": {
+      "boundary.malformed-uri": {
+        "protocolVersion": "2026-07-28",
+        "method": "resources/read",
+        "uri": "icm://../../real-user-state",
+        "expectedErrorCode": -32602,
+        "methodNotFoundAccepted": false,
+        "methodNotFoundBaselineClassification": "UNSUPPORTED_BASELINE",
+        "metadataOnEveryRequest": true
+      }
+    }
+  },
+  "semanticCorrections": {
+    "scenarioMappings": {
+      "modern.era-switch-after-initialize": "modern.reject-switch-to-2026-after-initialize",
+      "modern.era-switch-after-discover": "modern.reject-switch-to-initialize-after-discover"
+    },
+    "thresholdMappings": {
+      "resourceMaxEstimatedTokens": "resourceMaxPortableTokens",
+      "mockDaemonCount": "daemonCount",
+      "mockModelLoadCount": "daemonModelLoadCount"
+    },
+    "resourceConflictResolution": "The frozen JSON resource at icm://active-project/context, exact context-/contexte-/decisions- topic set, explicit empty DTO, utf8-bytes-v1 counter, 2048 portable-token and complete serialized-text byte bounds, exact cache/errors, and no templates supersede conflicting specialist markdown/tokenizer and narrower-topic recommendations. Implementations may not silently choose the alternative."
+  },
+  "normalization": {
+    "contract": "contracts/normalization-rules.json",
+    "default": "preserve",
+    "recursiveKeyMatchingAllowed": false,
+    "wholeDetailReplacementAllowed": false,
+    "objectOrArrayShapeChangesAllowed": false,
+    "dynamicScalarConsistencyRequired": true,
+    "unknownSameNamedKeysPreserved": true
+  },
+  "fixtureConstruction": {
+    "schema": "fixtures/sqlite-schema.sql",
+    "rows": "fixtures/store.json",
+    "productCratePathDependenciesAllowed": false,
+    "runtimeGeneratedFixtureIdsAllowed": false,
+    "runtimeGeneratedFixtureTimestampsAllowed": false,
+    "candidateInvocation": "separate process only"
+  },
+  "isolationGates": {
+    "freshSandboxPerScenario": true,
+    "environmentMode": "clear-then-allowlist",
+    "explicitWorkspaceRootRequired": true,
+    "candidateSuiteWorkEvidencePairwiseDisjoint": true,
+    "allRunnerPathsStrictChildrenOfWorkspace": true,
+    "gitWorkspaceAndAncestorsRejected": true,
+    "standardDefaultUserStateRootsRejected": true,
+    "providerDefaultAndExplicitStateRootsRejected": true,
+    "allRegisteredCanariesVerifiedAfterEveryScenario": true,
+    "configuredEndpointsLoopbackOnly": true,
+    "recordedIntegrationPeerAndLocalSocketsLoopback": true,
+    "evaluatorProvidedExternalEndpointsAllowed": 0,
+    "evaluatorProvidedRealUserPathsAllowed": 0,
+    "candidateChildInheritedRealStateInputsAllowed": 0,
+    "candidateAndMockChildCleanup": "timeout-bounded RAII kill-and-wait guard",
+    "requiredPlatforms": ["linux", "macos", "windows"],
+    "portableOrchestration": "rust-stdlib-no-shell",
+    "osLevelFirewallEnforcementClaimed": false,
+    "arbitrarySocketObservationClaimed": false,
+    "arbitrarySilentReadDetectionClaimed": false,
+    "supplementalOnly": ["host PSS", "real embedding model", "native provider integration"]
+  },
+  "environmentAllowlist": [
+    "HOME", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "XDG_CONFIG_HOME",
+    "XDG_CACHE_HOME", "XDG_DATA_HOME", "TMPDIR", "TEMP", "TMP", "ICM_CONFIG",
+    "ICM_DB_BACKEND", "ICM_READONLY", "ICM_PROXY_TOKEN", "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR", "PATH", "TZ", "LANG",
+    "LC_ALL", "NO_PROXY", "no_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY",
+    "RUST_BACKTRACE", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT"
+  ],
+  "legacyCatalog": {
+    "withoutEmbedder": [
+      "icm_memory_store", "icm_memory_recall", "icm_memory_forget",
+      "icm_memory_forget_topic", "icm_learn", "icm_memory_consolidate",
+      "icm_memory_list_topics", "icm_memory_stats", "icm_memory_update",
+      "icm_memory_health", "icm_memoir_create", "icm_memoir_list",
+      "icm_memoir_show", "icm_memoir_add_concept", "icm_memoir_refine",
+      "icm_memoir_search", "icm_memoir_link", "icm_memoir_inspect",
+      "icm_memoir_export", "icm_memory_extract_patterns", "icm_memoir_search_all",
+      "icm_feedback_record", "icm_feedback_search", "icm_feedback_stats",
+      "icm_transcript_start_session", "icm_transcript_record", "icm_transcript_search",
+      "icm_transcript_show", "icm_transcript_stats", "icm_wake_up"
+    ],
+    "embedderConditionalTail": "icm_memory_embed_all",
+    "requiredFields": {
+      "icm_memory_store": ["topic", "content"],
+      "icm_memory_recall": ["query"],
+      "icm_memory_forget": ["id"],
+      "icm_memory_forget_topic": ["topic"],
+      "icm_learn": [],
+      "icm_memory_consolidate": ["topic", "summary"],
+      "icm_memory_list_topics": [],
+      "icm_memory_stats": [],
+      "icm_memory_update": ["id", "content"],
+      "icm_memory_health": [],
+      "icm_memoir_create": ["name"],
+      "icm_memoir_list": [],
+      "icm_memoir_show": ["name"],
+      "icm_memoir_add_concept": ["memoir", "name", "definition"],
+      "icm_memoir_refine": ["memoir", "name", "definition"],
+      "icm_memoir_search": ["memoir", "query"],
+      "icm_memoir_link": ["memoir", "from", "to", "relation"],
+      "icm_memoir_inspect": ["memoir", "name"],
+      "icm_memoir_export": ["name"],
+      "icm_memory_extract_patterns": ["topic"],
+      "icm_memoir_search_all": ["query"],
+      "icm_feedback_record": ["topic", "context", "predicted", "corrected"],
+      "icm_feedback_search": ["query"],
+      "icm_feedback_stats": [],
+      "icm_transcript_start_session": [],
+      "icm_transcript_record": ["session_id", "role", "content"],
+      "icm_transcript_search": ["query"],
+      "icm_transcript_show": ["session_id"],
+      "icm_transcript_stats": [],
+      "icm_wake_up": [],
+      "icm_memory_embed_all": []
+    },
+    "exactParity": "SHA-256 equality of exact raw UTF-8 JSON-RPC response frames against committed golden hashes for deterministic scenarios",
+    "fieldOrderIsContract": true,
+    "resultOrderIsContract": true
+  },
+  "interfaces": {
+    "contextResourceUri": "icm://active-project/context",
+    "initializedLifecycleRequired": true,
+    "lifecycleViolation": {"code": -31011, "message": "protocol lifecycle violation; open a new connection"},
+    "providerCommands": [
+      "provider trust --provider <id> --scope <project-local|user> --yes",
+      "provider strip --provider <id> --scope <project-local|user> --yes",
+      "provider doctor --provider <id> --scope <project-local|user>",
+      "provider recover --provider <id> --scope <project-local|user> --yes"
+    ],
+    "providerResolvedPlanRequired": true,
+    "providerResolvedPlanFormat": "one JSON object on stdout with exact paths, surface, scope, dialect, installation-scoped serverId, exact two toolRules, preservedRestrictions, causalBlockers, and itemized ownershipDisposition",
+    "providerDoctorMatrixCase": "exact-path-and-scope for all five providers and both scopes",
+    "providerManifestPaths": {
+      "linux": "$XDG_DATA_HOME/icm/install-manifest.json",
+      "macos": "$HOME/Library/Application Support/icm/install-manifest.json",
+      "windows": "$APPDATA/icm/icm/data/install-manifest.json"
+    },
+    "providerUserRootsResolvedPerPlatform": true,
+    "providerUninstallCommand": "uninstall --yes --no-backup",
+    "providerUninstallDistinctFromStrip": true,
+    "topLevelDoctorPreserved": true,
+    "proxyCommand": "proxy --url <base-url> [--compact] [--token-file <path>]",
+    "proxyTokenEnvironment": "ICM_PROXY_TOKEN",
+    "proxyCredentialSourcesMutuallyExclusive": true,
+    "proxyInlineTokenFlagAllowed": false,
+    "proxyMcpPath": "mcp",
+    "proxyCompactQuery": "compact=true",
+    "productionEvaluationBackdoorsAllowed": false
+  },
+  "boundaryContracts": {
+    "topicCodePointMaximum": 255,
+    "contentByteMaximum": 65536,
+    "recallLimitMinimum": 1,
+    "recallLimitMaximum": 100,
+    "unknownInputFieldsRejected": true,
+    "learnDirectoryMustRemainWithinScenarioProject": true,
+    "stdioLineMaximumBytes": 10485760,
+    "oversizedLineProbePaddingBytes": 10485761
+  },
+  "scenarioInventory": {
+    "isolation": [
+      "iso.fixture-hashes", "iso.env-allowlist", "iso.path-containment",
+      "iso.canary-integrity-nondisclosure", "iso.child-input-real-state-exclusion",
+      "iso.configured-endpoints-loopback", "iso.mock-daemon-raii-cleanup",
+      "iso.two-root-equality"
+    ],
+    "legacy": [
+      "legacy.initialize-exact", "legacy.ping", "legacy.tools-list-exact",
+      "legacy.tools-list-order", "legacy.tools-list-required-fields", "legacy.list-empty",
+      "legacy.list-populated-group-order", "legacy.recall-empty", "legacy.recall-single-exact",
+      "legacy.recall-multi-order", "legacy.recall-compact-bytes", "legacy.recall-project-isolation",
+      "legacy.recall-preferences-global", "legacy.recall-topic-filter", "legacy.recall-keyword-filter",
+      "legacy.recall-access-mutation", "legacy.stats-empty-exact", "legacy.stats-populated-values",
+      "legacy.transcript-start", "legacy.transcript-record-all-roles",
+      "legacy.transcript-search-order", "legacy.transcript-show-order",
+      "legacy.transcript-stats-values", "legacy.feedback-record",
+      "legacy.feedback-search-order", "legacy.feedback-stats-values", "legacy.unknown-tool",
+      "legacy.method-not-found", "legacy.invalid-json", "legacy.missing-params",
+      "legacy.null-id", "legacy.notification-no-response"
+    ],
+    "modern": [
+      "modern.lifecycle-2024-complete", "modern.lifecycle-tools-list-before-initialize",
+      "modern.lifecycle-tools-call-before-initialize", "modern.lifecycle-request-before-initialized",
+      "modern.lifecycle-duplicate-initialized", "modern.lifecycle-second-initialize-era-change",
+      "modern.lifecycle-initialized-before-initialize",
+      "modern.2025-06-initialize", "modern.2025-11-initialize",
+      "modern.initialize-invalid-version", "modern.initialize-malformed-capabilities",
+      "modern.initialize-malformed-client-info", "modern.reject-switch-to-2026-after-initialize",
+      "modern.2026-discover", "modern.2026-client-info-optional", "modern.2026-missing-meta",
+      "modern.2026-malformed-meta", "modern.2026-unsupported-version",
+      "modern.reject-switch-to-initialize-after-discover", "modern.tools-list-order",
+      "modern.tools-list-annotations", "modern.tools-list-output-schemas",
+      "modern.tools-list-cache-metadata", "modern.structured-memory-recall",
+      "modern.structured-memory-list", "modern.structured-memory-stats",
+      "modern.structured-transcript-start", "modern.structured-transcript-record",
+      "modern.structured-transcript-search", "modern.structured-transcript-show",
+      "modern.structured-transcript-stats", "modern.structured-feedback-record",
+      "modern.structured-feedback-search", "modern.structured-feedback-stats",
+      "modern.concise-text-no-duplication", "modern.schema-valid-real-emissions",
+      "modern.2025-06-tools-list-projection", "modern.2025-11-tools-list-projection",
+      "modern.2025-06-structured-recall", "modern.2025-11-structured-recall",
+      "modern.2025-resources-list-projection", "modern.2025-resources-read-projection",
+      "modern.2026-missing-protocol-version", "modern.2026-missing-client-capabilities",
+      "modern.2026-malformed-client-capabilities", "modern.2026-malformed-client-info",
+      "modern.2026-misplaced-top-level-meta", "modern.2026-valid-extension-key",
+      "modern.2026-invalid-meta-key", "modern.tools-list-required-fields",
+      "modern.tools-list-closed-schemas", "modern.annotation-memory-store-destructive",
+      "modern.annotation-memory-recall-destructive", "modern.annotation-read-only-consistency",
+      "modern.annotation-idempotence-consistency", "modern.annotation-open-world-learn-only",
+      "modern.structured-empty-results"
+    ],
+    "resource": [
+      "resource.list-single-fixed-uri", "resource.read-values", "resource.empty",
+      "resource.excludes-preferences", "resource.excludes-other-project",
+      "resource.exact-project-topic-scope", "resource.malformed-uri", "resource.unknown-uri",
+      "resource.token-truncation", "resource.bounded-read", "resource.cache-metadata",
+      "resource.internal-failure", "resource.descriptor-exact", "resource.no-templates-capability",
+      "resource.templates-method-not-found", "resource.includes-context-topic",
+      "resource.includes-contexte-topic", "resource.includes-decisions-topic",
+      "resource.excludes-bare-project", "resource.excludes-prefix-subtopic",
+      "resource.excludes-suffix-alias", "resource.excludes-errors-resolved",
+      "resource.uri-trailing-slash", "resource.uri-query", "resource.uri-fragment",
+      "resource.uri-user-info", "resource.uri-authority-case",
+      "resource.caller-max-tokens-rejected", "resource.budget-accounting-exact",
+      "resource.wire-byte-budget", "resource.no-force-first", "resource.row-limit",
+      "resource.field-limit", "resource.read-only-access-count",
+      "resource.prompt-injection-sanitized", "resource.error-data-sanitized"
+    ],
+    "providerAxes": {
+      "providers": ["codex", "claude-code", "cursor", "opencode", "zed"],
+      "cases": [
+        "explicit-opt-in", "exact-registration-syntax", "exact-trust-syntax",
+        "exact-path-and-scope", "apply-preserves-unrelated-bytes",
+        "deny-confirm-ask-monotone", "exactly-two-tools", "no-server-wildcard",
+        "idempotent-reapply", "strip-owned-values-only", "uninstall-owned-values-only",
+        "external-equal-adopted-not-owned", "shadowing-fails-closed",
+        "normalization-collision-fails-closed", "malformed-config-zero-write",
+        "unknown-dialect-zero-write", "ambiguous-path-zero-write", "permissions-preserved",
+        "provenance-after-each-mutation"
+      ]
+    },
+    "proxy": [
+      "proxy.unsupported-baseline-proof", "proxy.trailing-slash-url", "proxy.base-path-url",
+      "proxy.compact-query", "proxy.bearer-auth", "proxy.no-auth", "proxy.exact-request-body",
+      "proxy.exact-response-body", "proxy.http-error-propagation", "proxy.connection-failure",
+      "proxy.three-client-topology", "proxy.single-mock-model-load",
+      "proxy.distinct-proxy-processes", "proxy.daemon-process-remains-one", "proxy.clean-shutdown",
+      "proxy.real-daemon-tools-list", "proxy.real-daemon-tool-call",
+      "proxy.origin-host-headers", "proxy.redirect-rejected", "proxy.userinfo-fragment-rejected",
+      "proxy.bad-content-type",
+      "proxy.oversized-response", "proxy.invalid-utf8-response", "proxy.sse-response-rejected",
+      "proxy.truncated-response", "proxy.request-timeout", "proxy.response-id-mismatch",
+      "proxy.request-size-bound", "proxy.token-file-auth", "proxy.token-env-auth",
+      "proxy.credential-source-conflict", "proxy.credential-redaction", "proxy.hop-by-hop-headers",
+      "proxy.ambient-proxy-disabled", "proxy.no-automatic-retry",
+      "proxy.legacy-session-continuity", "proxy.modern-stateless-no-session",
+      "proxy.notification-forwarding", "proxy.daemon-disappearance", "proxy.ipv6-loopback",
+      "proxy.real-daemon-cleanup"
+    ],
+    "boundaries": [
+      "boundary.empty-object", "boundary.empty-string", "boundary.whitespace", "boundary.null",
+      "boundary.wrong-json-type", "boundary.unknown-field", "boundary.max-topic-255",
+      "boundary.topic-256", "boundary.max-content-65536", "boundary.content-65537",
+      "boundary.limit-min", "boundary.limit-max", "boundary.limit-under", "boundary.limit-over",
+      "boundary.unicode", "boundary.rtl-zero-width", "boundary.newline-delimiter-injection",
+      "boundary.sql-injection", "boundary.fts-injection", "boundary.path-traversal",
+      "boundary.malformed-uri", "boundary.oversized-line"
+    ],
+    "metrics": [
+      "metrics.payload-sizes", "metrics.latency-five-blocks", "metrics.retrieval-quality"
+    ]
+  },
+  "metrics": {
+    "wireBytes": "exact UTF-8 bytes including one newline frame",
+    "resultBytes": "exact UTF-8 bytes of the result JSON slice",
+    "textBytes": "sum of UTF-8 text content bytes",
+    "structuredBytes": "compact JSON UTF-8 bytes of structuredContent",
+    "estimatedWireTokens": "ceil(wireBytes / 4), reporting only",
+    "latency": {
+      "operations": ["tools/list", "icm_memory_recall", "icm_memory_stats"],
+      "reportingOnly": true
+    },
+    "retrieval": {
+      "thresholdRefs": [
+        "retrievalK", "retrievalHitAt3Minimum", "retrievalRecallAt3Minimum",
+        "retrievalNdcgAt3Minimum"
+      ]
+    }
+  },
+  "acceptanceThresholds": {
+    "resourceMaxPortableTokens": 2048,
+    "resourceMaxWireBytes": 2048,
+    "modernRecallMaxWireBytes": 8192,
+    "modernConciseTextMaxBytes": 256,
+    "proxyClientCount": 3,
+    "proxyCallsPerClient": 3,
+    "daemonCount": 1,
+    "daemonModelLoadCount": 1,
+    "unsupportedBaselineRequiresWireOrCliEvidence": true,
+    "retrievalK": 3,
+    "retrievalHitAt3Minimum": 1.0,
+    "retrievalRecallAt3Minimum": 0.9,
+    "retrievalNdcgAt3Minimum": 0.95
+  },
+  "acceptanceBindings": {
+    "resourceMaxPortableTokens": {"scenario": "resource.budget-accounting-exact", "gate": "usedPortableTokens and utf8-bytes-v1"},
+    "resourceMaxWireBytes": {"scenario": "resource.wire-byte-budget", "gate": "complete serialized resource text bytes"},
+    "modernRecallMaxWireBytes": {"scenario": "modern.structured-memory-recall", "gate": "raw newline-delimited response frame bytes"},
+    "modernConciseTextMaxBytes": {"scenario": "modern.concise-text-no-duplication", "gate": "UTF-8 text content bytes"},
+    "proxyClientCount": {"scenario": "proxy.three-client-topology", "gate": "distinct proxy process count"},
+    "proxyCallsPerClient": {"scenario": "proxy.three-client-topology", "gate": "calls completed per proxy"},
+    "daemonCount": {"scenario": "proxy.daemon-process-remains-one", "gate": "one shared daemon process"},
+    "daemonModelLoadCount": {"scenario": "proxy.single-mock-model-load", "gate": "evaluator-owned mock model construction count"},
+    "unsupportedBaselineRequiresWireOrCliEvidence": {"scenario": "proxy.unsupported-baseline-proof", "gate": "global UnsupportedBaseline constructor rejects outcomes without recognized method/status wire evidence or command/nonzero-exit CLI evidence"},
+    "retrievalK": {"scenario": "metrics.retrieval-quality", "gate": "exact top-k fixture and request limit"},
+    "retrievalHitAt3Minimum": {"scenario": "metrics.retrieval-quality", "gate": "macro Hit@3 minimum"},
+    "retrievalRecallAt3Minimum": {"scenario": "metrics.retrieval-quality", "gate": "macro Recall@3 minimum"},
+    "retrievalNdcgAt3Minimum": {"scenario": "metrics.retrieval-quality", "gate": "macro nDCG@3 minimum"}
+  }
+}

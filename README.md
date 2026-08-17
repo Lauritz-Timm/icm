@@ -753,6 +753,7 @@ Score = 60% recall accuracy + 30% fact detail + 10% speed. **98% multi-agent eff
 |----------|-------------|
 | [Integration Guide](docs/integrations.md) | Setup for all 17 tools: Claude Code, Copilot, Cursor, Windsurf, Zed, Amp, etc. |
 | [Technical Architecture](docs/architecture.md) | Crate structure, search pipeline, decay model, sqlite-vec integration, testing |
+| [MCP Evaluator](crates/icm-mcp-eval/README.md) | Frozen MCP compatibility contracts, isolated 294-scenario runner, and CI commands |
 | [User Guide](docs/guide.md) | Installation, topic organization, consolidation, extraction, troubleshooting |
 | [Product Overview](docs/product.md) | Use cases, benchmarks, comparison with alternatives |
 

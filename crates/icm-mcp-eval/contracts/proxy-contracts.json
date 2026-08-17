@@ -1,0 +1,65 @@
+{
+  "contractVersion": 3,
+  "accessedAt": "2026-08-07",
+  "sources": [
+    "https://modelcontextprotocol.io/specification/2025-11-25/basic/transports"
+  ],
+  "cli": {
+    "command": "proxy --url <base-url> [--compact] [--token-file <path>]",
+    "tokenEnvironment": "ICM_PROXY_TOKEN",
+    "inlineTokenFlagAllowed": false,
+    "credentialSourcesMutuallyExclusive": true
+  },
+  "endpoint": {
+    "scheme": "http",
+    "loopbackOnly": true,
+    "userinfoAllowed": false,
+    "fragmentAllowed": false,
+    "redirectsFollowed": false,
+    "ambientProxyEnvironmentHonored": false,
+    "pathSuffix": "mcp",
+    "compactQuery": "compact=true"
+  },
+  "http": {
+    "method": "POST",
+    "requestContentType": "application/json",
+    "acceptedResponseContentType": "application/json",
+    "host": "exact selected authority",
+    "origin": "absent",
+    "mcpProtocolVersion": "Mcp-Protocol-Version follows the negotiated protocol era: 2025-11-25 after 2025 initialization, or per-request 2026-07-28",
+    "mcpMethod": "Mcp-Method is required only for per-request 2026-07-28; it is the exact JSON-RPC body method and is absent after initialized 2025-11-25",
+    "mcpName": "Mcp-Name is required only for 2026-07-28 name-bearing methods, with exact params.name; it is absent for tools/list and after initialized 2025-11-25",
+    "legacy2025Session": "Mcp-Session-Id is an opaque value from the initialize response, reused after notifications/initialized for negotiated 2025-11-25",
+    "modern2026Session": "Mcp-Session-Id is absent for per-request 2026-07-28",
+    "automaticRetries": 0,
+    "hopByHopHeadersForwarded": false,
+    "responseIdMustEqualRequestId": true,
+    "sseAccepted": false,
+    "utf8Required": true,
+    "completeBodyRequired": true,
+    "requestAndResponseBoundsRequired": true,
+    "timeoutRequired": true
+  },
+  "serverHttp": {
+    "originAbsentAccepted": true,
+    "nonLoopbackOrInvalidOriginStatus": 403,
+    "unknownOrTerminatedSessionStatus": 404,
+    "invalidOrMismatchedProtocolVersionStatus": 400,
+    "deleteTerminatesSession": true
+  },
+  "proxySessionLifecycle": {
+    "negotiatedVersionLockedUntilEof": true,
+    "bodyMetadataCannotOverrideNegotiatedVersion": true,
+    "deleteOnEof": true,
+    "deleteUsesNegotiatedVersionAndSession": true
+  },
+  "auth": {
+    "authorization": "Bearer <trimmed-token>",
+    "tokenFileWhitespaceTrimmed": true,
+    "redactFromStdoutStderrAndErrors": true
+  },
+  "evidence": {
+    "blackBoxCasesUseEvaluatorOwnedLoopbackDaemon": true,
+    "rawRequestsAndResponsesRequired": true
+  }
+}

@@ -2232,9 +2232,6 @@ fn main() -> Result<()> {
             let result = match command {
                 HookCommands::Pre => cmd_hook_pre(),
                 HookCommands::Post { every } => {
-                    if !cfg.extraction.enabled {
-                        return Ok(());
-                    }
                     // CLI flag wins over config; absent flag falls back to config.
                     let extract_every = every.unwrap_or(cfg.extraction.extract_every);
                     #[cfg(feature = "embeddings")]
@@ -2245,6 +2242,7 @@ fn main() -> Result<()> {
                         &store,
                         emb_ref,
                         &cfg.memory,
+                        cfg.extraction.enabled,
                         extract_every,
                         cfg.extraction.store_raw,
                         &cfg.extraction.summarizer,
@@ -3408,6 +3406,7 @@ fn cmd_hook_post(
     store: &Store,
     embedder: Option<&dyn icm_core::Embedder>,
     memory_cfg: &crate::config::MemoryConfig,
+    extraction_enabled: bool,
     extract_every: usize,
     store_raw: bool,
     extraction_summarizer: &crate::config::SummarizerConfig,
@@ -3463,6 +3462,13 @@ fn cmd_hook_post(
                 Some(tool_name),
             );
         }
+    }
+
+    // `[extraction].enabled = false` (issue #424) stops here — archive
+    // and code-areas capture above are independent features and must
+    // keep running regardless of this flag.
+    if !extraction_enabled {
+        return Ok(());
     }
 
     // Track tool calls in SQLite (atomic, persists across reboots)

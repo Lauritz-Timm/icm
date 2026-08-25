@@ -20,7 +20,7 @@
 //!     (which the issue's manual smoke covers).
 #![cfg(all(target_os = "linux", feature = "http-api"))]
 
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
@@ -276,4 +276,67 @@ fn missing_required_fields_return_400() {
         }
         other => panic!("expected error, got {other:?}"),
     }
+}
+
+#[test]
+fn stdio_proxy_forwards_tools_call_to_http_daemon() {
+    let (_dir, db) = temp_db();
+    let server = spawn_server(&db, &["--token", "proxy-secret"]);
+
+    let mut proxy = Command::new(ICM)
+        .arg("--no-embeddings")
+        .arg("serve")
+        .arg("--http-proxy")
+        .arg(format!("http://{}", server.addr))
+        .arg("--token")
+        .arg("proxy-secret")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn icm serve --http-proxy");
+
+    let request = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {
+            "name": "icm_memory_store",
+            "arguments": {
+                "topic": "proxy-test",
+                "content": "stored through stdio proxy"
+            }
+        }
+    });
+    {
+        let mut stdin = proxy.stdin.take().expect("proxy stdin");
+        writeln!(stdin, "{request}").expect("write JSON-RPC request");
+    }
+
+    let output = proxy.wait_with_output().expect("wait for proxy");
+    assert!(
+        output.status.success(),
+        "proxy failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let response: serde_json::Value =
+        serde_json::from_slice(&output.stdout).expect("proxy emitted JSON-RPC");
+    assert_eq!(response["jsonrpc"], "2.0");
+    assert_eq!(response["id"], 1);
+    assert!(response.get("result").is_some(), "response: {response}");
+
+    let recall = ureq::post(&format!("http://{}/recall?format=json", server.addr))
+        .timeout(Duration::from_secs(5))
+        .set("authorization", "Bearer proxy-secret")
+        .set("content-type", "application/json")
+        .send_string(r#"{"query":"stdio proxy","topic":"proxy-test"}"#)
+        .expect("authenticated recall");
+    let memories: serde_json::Value =
+        serde_json::from_str(&recall.into_string().unwrap()).expect("recall JSON");
+    assert!(
+        memories.as_array().is_some_and(|items| items
+            .iter()
+            .any(|item| item["summary"] == "stored through stdio proxy")),
+        "proxied store did not reach daemon DB: {memories}"
+    );
 }
